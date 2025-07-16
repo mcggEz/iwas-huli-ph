@@ -16,27 +16,6 @@ function loadGoogleMapsScript(apiKey: string): Promise<void> | undefined {
   });
 }
 
-const VIOLATION_ZONES = [
-  {
-    position: { lat: 14.5995, lng: 120.9842 },
-    title: "Quiapo",
-    description: "Frequent no parking violations.",
-    radius: 200 // meters
-  },
-  {
-    position: { lat: 14.6091, lng: 121.0223 },
-    title: "EDSA Cubao",
-    description: "Speeding and lane violations.",
-    radius: 300 // meters
-  },
-  {
-    position: { lat: 14.5611, lng: 121.0133 },
-    title: "Makati CBD",
-    description: "One-way and illegal turn violations.",
-    radius: 250 // meters
-  }
-];
-
 const VIOLATION_TYPES = [
   "No Parking",
   "Speeding",
@@ -113,10 +92,7 @@ function calculateDistance(lat1: number, lng1: number, lat2: number, lng2: numbe
 
 // Helper function to check if a point is near any violation zone
 function isNearViolationZone(lat: number, lng: number): boolean {
-  return VIOLATION_ZONES.some(zone => {
-    const distance = calculateDistance(lat, lng, zone.position.lat, zone.position.lng);
-    return distance <= zone.radius;
-  });
+  return false; // No hardcoded zones, so always false
 }
 
 // Helper function to generate circle path for polygon
@@ -150,7 +126,7 @@ export default function Dashboard() {
   const drivingWatchId = useRef<number | null>(null);
   const [violationPolygons, setViolationPolygons] = useState<any[]>([]);
   const [, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
-  const [, setUserLocationMarker] = useState<any>(null);
+  const [userLocationMarker, setUserLocationMarker] = useState<any>(null);
   const notifiedZonesRef = useRef<{ [key: string]: number }>({});
 
   const [formData, setFormData] = useState({
@@ -213,35 +189,6 @@ export default function Dashboard() {
         // Add violation zone markers
         infoWindow = new (window as any).google.maps.InfoWindow();
         
-        markers = VIOLATION_ZONES.map((zone) => {
-          const marker = new (window as any).google.maps.Marker({
-            position: zone.position,
-            map: mapInstance,
-            title: zone.title,
-            icon: {
-              url: 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(`
-                <svg width="36" height="36" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <circle cx="12" cy="12" r="8" fill="#ff4444" stroke="#ffffff" stroke-width="2"/>
-                  <circle cx="12" cy="12" r="3" fill="#ffffff"/>
-                </svg>
-              `),
-              scaledSize: new (window as any).google.maps.Size(36, 36)
-            }
-          });
-          
-          marker.addListener("click", () => {
-            infoWindow.setContent(`
-              <div style="background: #171717; color: #ededed; font-family: 'Geist Mono', 'Fira Mono', 'monospace'; border: 1.5px solid #ff4444; border-radius: 8px; box-shadow: 0 2px 12px #000a; padding: 16px; min-width: 220px; max-width: 320px;">
-                <div style="font-size: 1.1rem; font-weight: bold; color: #ff4444; margin-bottom: 6px; letter-spacing: 1px;">${zone.title}</div>
-                <div style="font-size: 0.95rem; color: #ededed; margin-bottom: 8px;">${zone.description}</div>
-                <div style="font-size: 0.85rem; color: #888;">Violation Zone</div>
-              </div>
-            `);
-            infoWindow.open(mapInstance, marker);
-          });
-          return marker;
-        });
-
         // Add click listener for drop mode
         mapInstance.addListener("click", (event: any) => {
           if (isDropMode) {
@@ -272,17 +219,7 @@ export default function Dashboard() {
       
       if (highlightRoads) {
         // Create red-tinted areas that make roads appear red within violation zones
-        const newPolygons = VIOLATION_ZONES.map((zone) => {
-          return new (window as any).google.maps.Polygon({
-            paths: generateCirclePath(zone.position.lat, zone.position.lng, zone.radius),
-            strokeColor: '#ff4444',
-            strokeOpacity: 0.8,
-            strokeWeight: 2,
-            fillColor: '#ff4444',
-            fillOpacity: 0.6, // High opacity to make roads clearly appear red
-            map: map,
-          });
-        });
+        const newPolygons: any[] = [];
         setViolationPolygons(newPolygons);
       } else {
         setViolationPolygons([]);
@@ -296,22 +233,7 @@ export default function Dashboard() {
       Notification.requestPermission();
       watchId = navigator.geolocation.watchPosition((position) => {
         const { latitude, longitude } = position.coords;
-        VIOLATION_ZONES.forEach(zone => {
-          const distance = calculateDistance(latitude, longitude, zone.position.lat, zone.position.lng);
-          if (distance <= zone.radius) {
-            // Only notify if not notified in the last 2 minutes for this zone
-            const now = Date.now();
-            if (!notifiedZonesRef.current[zone.title] || now - notifiedZonesRef.current[zone.title] > 2 * 60 * 1000) {
-              if (Notification.permission === 'granted') {
-                new Notification('IWAS HULI ALERT', {
-                  body: `You are near ${zone.title}: ${zone.description}`,
-                  icon: '/favicon.ico'
-                });
-                notifiedZonesRef.current[zone.title] = now;
-              }
-            }
-          }
-        });
+        // No hardcoded zones, so no notifications
       });
     }
     return () => {
@@ -343,6 +265,41 @@ export default function Dashboard() {
       }
     };
   }, [isDrivingMode, map]);
+
+  // Always show and update user location marker
+  useEffect(() => {
+    if (!map) return;
+    let watchId: number | undefined;
+    if (typeof window !== 'undefined' && 'geolocation' in navigator) {
+      watchId = navigator.geolocation.watchPosition((position) => {
+        const { latitude, longitude } = position.coords;
+        setUserLocationMarker((prevMarker: any) => {
+          if (prevMarker) {
+            prevMarker.setPosition({ lat: latitude, lng: longitude });
+            return prevMarker;
+          } else {
+            const marker = new (window as any).google.maps.Marker({
+              position: { lat: latitude, lng: longitude },
+              map: map,
+              title: 'You are here',
+              icon: {
+                path: (window as any).google.maps.SymbolPath.CIRCLE,
+                scale: 8,
+                fillColor: '#4285F4',
+                fillOpacity: 1,
+                strokeColor: '#ffffff',
+                strokeWeight: 2
+              }
+            });
+            return marker;
+          }
+        });
+      });
+    }
+    return () => {
+      if (watchId !== undefined) navigator.geolocation.clearWatch(watchId);
+    };
+  }, [map, setUserLocationMarker]);
 
   const handleSearch = () => {
     if (searchQuery.trim() && map) {
@@ -413,7 +370,13 @@ export default function Dashboard() {
   };
 
   return (
-    <div className="fixed inset-0 w-screen h-screen overflow-hidden" style={{ backgroundColor: theme.bg }}>
+    <div
+      className="fixed inset-0 w-screen h-screen overflow-hidden"
+      style={{
+        backgroundColor: theme.bg,
+        cursor: isDropMode ? 'copy' : 'default',
+      }}
+    >
       {/* Map background */}
       <div ref={mapRef} className="absolute inset-0 w-full h-full" />
       
@@ -924,6 +887,29 @@ export default function Dashboard() {
               </div>
             </div>
           </div>
+        </div>
+      )}
+      {/* Add Mode Cursor Indicator */}
+      {isDropMode && (
+        <div
+          style={{
+            position: 'fixed',
+            left: '50%',
+            top: '50%',
+            transform: 'translate(-50%, -50%)',
+            pointerEvents: 'none',
+            zIndex: 100,
+            fontSize: 48,
+            color: theme.accent,
+            opacity: 0.7,
+            animation: 'pulse 1.2s infinite',
+          }}
+        >
+          <svg width="48" height="48" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <circle cx="12" cy="12" r="10" strokeWidth="2"/>
+            <line x1="12" y1="8" x2="12" y2="16" strokeWidth="2"/>
+            <line x1="8" y1="12" x2="16" y2="12" strokeWidth="2"/>
+          </svg>
         </div>
       )}
     </div>

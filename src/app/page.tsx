@@ -24,8 +24,7 @@ export default function Home() {
         <div className="relative z-10 text-center max-w-2xl sm:max-w-4xl mx-auto w-full">
           <div className="mb-8">
             <h1 className="text-3xl sm:text-5xl md:text-7xl font-bold text-white mb-4 sm:mb-6 leading-tight font-mono">
-              IWAS HULI
-              <span className="block text-[#ff4444] text-2xl sm:text-4xl">PARA DI KULONG</span>
+              IWAS HULI App
             </h1>
             <p className="text-base sm:text-xl md:text-2xl text-[#888888] mb-6 sm:mb-12 max-w-3xl mx-auto leading-relaxed font-mono">
               Navigate Manila&apos;s roads with confidence. Get real-time alerts about traffic violation hotspots and stay informed to avoid fines.
