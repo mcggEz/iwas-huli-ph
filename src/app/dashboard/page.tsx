@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from "react";
-import Image from "next/image";
+
 
 function loadGoogleMapsScript(apiKey: string): Promise<void> | undefined {
   if (typeof window === "undefined") return;
@@ -139,13 +139,18 @@ export default function Dashboard() {
   const [searchQuery, setSearchQuery] = useState("");
   const [isDropMode, setIsDropMode] = useState(false);
   const [map, setMap] = useState<any>(null);
+
   const [showForm, setShowForm] = useState(false);
   const [selectedLocation, setSelectedLocation] = useState<any>(null);
   const [showMenu, setShowMenu] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [highlightRoads, setHighlightRoads] = useState(true);
+  const [isDrivingMode, setIsDrivingMode] = useState(false);
+  const drivingWatchId = useRef<number | null>(null);
   const [violationPolygons, setViolationPolygons] = useState<any[]>([]);
+  const [, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
+  const [, setUserLocationMarker] = useState<any>(null);
   const notifiedZonesRef = useRef<{ [key: string]: number }>({});
 
   const [formData, setFormData] = useState({
@@ -166,11 +171,13 @@ export default function Dashboard() {
   useEffect(() => {
     const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
     if (!apiKey) return; // Don't load if not set
+    let markers: any[] = [];
     let infoWindow: any = null;
     let mapInstance: any = null;
     
     loadGoogleMapsScript(apiKey)?.then(() => {
       if (mapRef.current && (window as any).google) {
+        // @ts-ignore
         mapInstance = new (window as any).google.maps.Map(mapRef.current, {
           center: { lat: 14.5995, lng: 120.9842 },
           zoom: 12,
@@ -183,6 +190,7 @@ export default function Dashboard() {
         if (navigator.geolocation) {
           navigator.geolocation.getCurrentPosition((position) => {
             const { latitude, longitude } = position.coords;
+            setUserLocation({ lat: latitude, lng: longitude });
             mapInstance.setCenter({ lat: latitude, lng: longitude });
             // Add marker or blue dot
             const marker = new (window as any).google.maps.Marker({
@@ -198,13 +206,14 @@ export default function Dashboard() {
                 strokeWeight: 2
               }
             });
+            setUserLocationMarker(marker);
           });
         }
 
         // Add violation zone markers
         infoWindow = new (window as any).google.maps.InfoWindow();
         
-        VIOLATION_ZONES.forEach((zone) => {
+        markers = VIOLATION_ZONES.map((zone) => {
           const marker = new (window as any).google.maps.Marker({
             position: zone.position,
             map: mapInstance,
@@ -230,6 +239,7 @@ export default function Dashboard() {
             `);
             infoWindow.open(mapInstance, marker);
           });
+          return marker;
         });
 
         // Add click listener for drop mode
@@ -243,14 +253,14 @@ export default function Dashboard() {
       }
     });
     return () => {};
-  }, [isDropMode, isDarkMode, highlightRoads, generateMapStyles]);
+  }, [isDropMode, isDarkMode, highlightRoads]);
 
   // Update map styles when theme changes
   useEffect(() => {
     if (map) {
       map.setOptions({ styles: generateMapStyles() });
     }
-  }, [isDarkMode, generateMapStyles, map]);
+  }, [isDarkMode]);
 
   // Manage violation zone highlighting when toggled
   useEffect(() => {
@@ -265,10 +275,10 @@ export default function Dashboard() {
         const newPolygons = VIOLATION_ZONES.map((zone) => {
           return new (window as any).google.maps.Polygon({
             paths: generateCirclePath(zone.position.lat, zone.position.lng, zone.radius),
-            strokeColor: '#ff6666',
+            strokeColor: '#ff4444',
             strokeOpacity: 0.8,
             strokeWeight: 2,
-            fillColor: '#ff6666',
+            fillColor: '#ff4444',
             fillOpacity: 0.6, // High opacity to make roads clearly appear red
             map: map,
           });
@@ -278,7 +288,7 @@ export default function Dashboard() {
         setViolationPolygons([]);
       }
     }
-  }, [highlightRoads, map, generateCirclePath]);
+  }, [highlightRoads, map]);
 
   useEffect(() => {
     let watchId: number | undefined;
@@ -309,6 +319,31 @@ export default function Dashboard() {
     };
   }, []);
 
+  // Driving Mode: Center map on user and keep updated
+  useEffect(() => {
+    if (!map) return;
+    if (isDrivingMode) {
+      if (typeof window !== 'undefined' && 'geolocation' in navigator) {
+        drivingWatchId.current = navigator.geolocation.watchPosition((position) => {
+          const { latitude, longitude } = position.coords;
+          map.setCenter({ lat: latitude, lng: longitude });
+        });
+      }
+    } else {
+      if (drivingWatchId.current !== null) {
+        navigator.geolocation.clearWatch(drivingWatchId.current);
+        drivingWatchId.current = null;
+      }
+    }
+    // Cleanup on unmount or mode change
+    return () => {
+      if (drivingWatchId.current !== null) {
+        navigator.geolocation.clearWatch(drivingWatchId.current);
+        drivingWatchId.current = null;
+      }
+    };
+  }, [isDrivingMode, map]);
+
   const handleSearch = () => {
     if (searchQuery.trim() && map) {
       const geocoder = new (window as any).google.maps.Geocoder();
@@ -333,7 +368,7 @@ export default function Dashboard() {
         icon: {
           url: 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(`
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <circle cx="12" cy="12" r="8" fill="#00ff00" stroke="#ffffff" stroke-width="2"/>
+              <circle cx="12" cy="12" r="8" fill="#ff4444" stroke="#ffffff" stroke-width="2"/>
               <circle cx="12" cy="12" r="3" fill="#ffffff"/>
             </svg>
           `),
@@ -345,8 +380,8 @@ export default function Dashboard() {
       const infoWindow = new (window as any).google.maps.InfoWindow();
       newMarker.addListener("click", () => {
         infoWindow.setContent(`
-          <div style="background: #171717; color: #ededed; font-family: 'Geist Mono', 'Fira Mono', 'monospace'; border: 1.5px solid #00ff00; border-radius: 8px; box-shadow: 0 2px 12px #000a; padding: 16px; min-width: 220px; max-width: 320px;">
-            <div style="font-size: 1.1rem; font-weight: bold; color: #00ff00; margin-bottom: 6px; letter-spacing: 1px;">${formData.violationType}</div>
+          <div style="background: #171717; color: #ededed; font-family: 'Geist Mono', 'Fira Mono', 'monospace'; border: 1.5px solid #ff4444; border-radius: 8px; box-shadow: 0 2px 12px #000a; padding: 16px; min-width: 220px; max-width: 320px;">
+            <div style="font-size: 1.1rem; font-weight: bold; color: #ff4444; margin-bottom: 6px; letter-spacing: 1px;">${formData.violationType}</div>
             <div style="font-size: 0.95rem; color: #ededed; margin-bottom: 8px;"><b>Description:</b> ${formData.description}</div>
             <div style="font-size: 0.95rem; color: #ededed; margin-bottom: 8px;"><b>Reasons:</b> ${formData.reasons}</div>
             <div style="font-size: 0.95rem; color: #ededed; margin-bottom: 8px;"><b>Solutions:</b> ${formData.solutions}</div>
@@ -356,7 +391,7 @@ export default function Dashboard() {
         infoWindow.open(map, newMarker);
       });
 
-      map.addOverlay(newMarker);
+  
     }
 
     // Reset form and close modal
@@ -501,26 +536,59 @@ export default function Dashboard() {
         onClick={() => setHighlightRoads(!highlightRoads)}
         className="absolute bottom-4 sm:bottom-8 left-4 sm:left-8 rounded-none w-12 sm:w-16 h-12 sm:h-16 flex items-center justify-center transition-colors z-10"
         style={{ 
-          backgroundColor: highlightRoads ? theme.accent : `${theme.bg}95`, 
-          border: `1px solid ${theme.border}`, 
-          color: highlightRoads ? theme.bg : theme.text
+          backgroundColor: highlightRoads ? '#ff4444' : '#ffcccc',
+          border: '1px solid #ff4444',
+          color: highlightRoads ? '#fff' : '#ff4444'
         }}
         onMouseEnter={(e) => {
-          if (!highlightRoads) {
-            e.currentTarget.style.backgroundColor = theme.accent;
-            e.currentTarget.style.color = theme.bg;
-          }
+          e.currentTarget.style.backgroundColor = '#ff4444';
+          e.currentTarget.style.color = '#fff';
         }}
         onMouseLeave={(e) => {
-          if (!highlightRoads) {
-            e.currentTarget.style.backgroundColor = `${theme.bg}95`;
-            e.currentTarget.style.color = theme.text;
+          if (highlightRoads) {
+            e.currentTarget.style.backgroundColor = '#ff4444';
+            e.currentTarget.style.color = '#fff';
+          } else {
+            e.currentTarget.style.backgroundColor = '#ffcccc';
+            e.currentTarget.style.color = '#ff4444';
           }
         }}
         title={highlightRoads ? "Road highlighting ON" : "Road highlighting OFF"}
       >
         <svg width="24" height="24" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-1.447-.894L15 4m0 13V4m0 0L9 7" />
+        </svg>
+      </button>
+
+      {/* Driving Mode Toggle Button - Lower Left, next to Road Highlight */}
+      <button
+        onClick={() => setIsDrivingMode(!isDrivingMode)}
+        className="absolute bottom-4 sm:bottom-8 left-36 sm:left-52 rounded-none w-12 sm:w-16 h-12 sm:h-16 flex items-center justify-center transition-colors z-10"
+        style={{
+          backgroundColor: isDrivingMode ? '#4285F4' : '#e3f2fd',
+          border: '1px solid #4285F4',
+          color: isDrivingMode ? '#fff' : '#4285F4'
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.backgroundColor = '#4285F4';
+          e.currentTarget.style.color = '#fff';
+        }}
+        onMouseLeave={(e) => {
+          if (isDrivingMode) {
+            e.currentTarget.style.backgroundColor = '#4285F4';
+            e.currentTarget.style.color = '#fff';
+          } else {
+            e.currentTarget.style.backgroundColor = '#e3f2fd';
+            e.currentTarget.style.color = '#4285F4';
+          }
+        }}
+        title={isDrivingMode ? "Driving Mode ON" : "Driving Mode OFF"}
+      >
+        <svg width="24" height="24" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <rect x="4" y="11" width="16" height="7" rx="2" strokeWidth="2" />
+          <circle cx="7.5" cy="18.5" r="1.5" />
+          <circle cx="16.5" cy="18.5" r="1.5" />
+          <rect x="7" y="7" width="10" height="4" rx="2" strokeWidth="2" />
         </svg>
       </button>
 
