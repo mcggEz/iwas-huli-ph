@@ -1,5 +1,4 @@
 "use client";
-import Image from "next/image";
 
 export default function Home() {
   return (
@@ -29,10 +28,10 @@ export default function Home() {
               <span className="block text-[#ff4444] text-2xl sm:text-4xl">PARA DI KULONG</span>
             </h1>
             <p className="text-base sm:text-xl md:text-2xl text-[#888888] mb-6 sm:mb-12 max-w-3xl mx-auto leading-relaxed font-mono">
-              Navigate Manila's roads with confidence. Get real-time alerts about traffic violation hotspots and stay informed to avoid fines.
+              Navigate Manila&apos;s roads with confidence. Get real-time alerts about traffic violation hotspots and stay informed to avoid fines.
             </p>
             <p className="text-base sm:text-lg md:text-xl text-[#ff4444] mb-8 sm:mb-12 max-w-3xl mx-auto leading-relaxed font-mono font-bold">
-              "See where other drivers went wrong"
+              &quot;See where other drivers went wrong&quot;
             </p>
           </div>
           {/* CTA Buttons */}
@@ -120,7 +119,7 @@ export default function Home() {
         <div className="max-w-4xl mx-auto text-center">
           <h2 className="text-2xl sm:text-4xl md:text-5xl font-bold text-white mb-6 sm:mb-8 font-mono">ABOUT IWAS HULI</h2>
           <p className="text-base sm:text-xl text-[#888888] leading-relaxed mb-8 sm:mb-12 font-mono">
-            We're committed to making Manila's roads safer for everyone. Our platform helps drivers stay informed about traffic violations and avoid unnecessary fines while promoting responsible driving.
+            We&apos;re committed to making Manila&apos;s roads safer for everyone. Our platform helps drivers stay informed about traffic violations and avoid unnecessary fines while promoting responsible driving.
           </p>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-8">
             <div className="text-left border border-[#ffffff] p-4 sm:p-8 bg-[#0a0a0a]">
@@ -147,7 +146,7 @@ export default function Home() {
             <span className="text-white font-bold text-base sm:text-lg font-mono">IWAS HULI</span>
           </div>
           <p className="text-[#888888] mb-4 sm:mb-6 font-mono text-sm sm:text-base">
-            Making Manila's roads safer, one driver at a time.
+            Making Manila&apos;s roads safer, one driver at a time.
           </p>
           <div className="text-[#666666] text-xs sm:text-sm font-mono">
             &copy; {new Date().getFullYear()} IWAS HULI. ALL RIGHTS RESERVED.

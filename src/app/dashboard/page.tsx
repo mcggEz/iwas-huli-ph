@@ -138,7 +138,6 @@ export default function Dashboard() {
   const [searchQuery, setSearchQuery] = useState("");
   const [isDropMode, setIsDropMode] = useState(false);
   const [map, setMap] = useState<google.maps.Map | null>(null);
-  const [userMarkers, setUserMarkers] = useState<google.maps.Marker[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [selectedLocation, setSelectedLocation] = useState<google.maps.LatLng | null>(null);
   const [showMenu, setShowMenu] = useState(false);
@@ -146,8 +145,6 @@ export default function Dashboard() {
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [highlightRoads, setHighlightRoads] = useState(true);
   const [violationPolygons, setViolationPolygons] = useState<google.maps.Polygon[]>([]);
-  const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
-  const [userLocationMarker, setUserLocationMarker] = useState<google.maps.Marker | null>(null);
   const notifiedZonesRef = useRef<{ [key: string]: number }>({});
 
   const [formData, setFormData] = useState({
@@ -168,14 +165,11 @@ export default function Dashboard() {
   useEffect(() => {
     const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
     if (!apiKey) return; // Don't load if not set
-    let markers: google.maps.Marker[] = [];
-    let infoWindow: google.maps.InfoWindow | null = null;
-    let mapInstance: google.maps.Map | null = null;
     
     loadGoogleMapsScript(apiKey)?.then(() => {
       if (mapRef.current && (window as unknown as { google?: typeof google }).google) {
-        // @ts-expect-error
-        mapInstance = new (window as unknown as { google?: typeof google }).google.maps.Map(mapRef.current, {
+       
+        const mapInstance = new (window as any).google.maps.Map(mapRef.current, {
           center: { lat: 14.5995, lng: 120.9842 },
           zoom: 12,
           disableDefaultUI: true,
@@ -187,7 +181,7 @@ export default function Dashboard() {
         if (navigator.geolocation) {
           navigator.geolocation.getCurrentPosition((position) => {
             const { latitude, longitude } = position.coords;
-            setUserLocation({ lat: latitude, lng: longitude });
+        
             mapInstance.setCenter({ lat: latitude, lng: longitude });
             // Add marker or blue dot
             const marker = new (window as unknown as { google?: typeof google }).google.maps.Marker({
@@ -203,14 +197,13 @@ export default function Dashboard() {
                 strokeWeight: 2
               }
             });
-            setUserLocationMarker(marker);
           });
         }
 
         // Add violation zone markers
-        infoWindow = new (window as unknown as { google?: typeof google }).google.maps.InfoWindow();
+        const infoWindow = new (window as unknown as { google?: typeof google }).google.maps.InfoWindow();
         
-        markers = VIOLATION_ZONES.map((zone) => {
+        VIOLATION_ZONES.forEach((zone) => {
           const marker = new (window as unknown as { google?: typeof google }).google.maps.Marker({
             position: zone.position,
             map: mapInstance,
@@ -236,7 +229,6 @@ export default function Dashboard() {
             `);
             infoWindow.open(mapInstance, marker);
           });
-          return marker;
         });
 
         // Add click listener for drop mode
@@ -250,14 +242,14 @@ export default function Dashboard() {
       }
     });
     return () => {};
-  }, [isDropMode, isDarkMode, highlightRoads]);
+  }, [isDropMode, isDarkMode, highlightRoads, generateMapStyles]);
 
   // Update map styles when theme changes
   useEffect(() => {
     if (map) {
       map.setOptions({ styles: generateMapStyles() });
     }
-  }, [isDarkMode]);
+  }, [isDarkMode, generateMapStyles, map]);
 
   // Manage violation zone highlighting when toggled
   useEffect(() => {
@@ -285,7 +277,7 @@ export default function Dashboard() {
         setViolationPolygons([]);
       }
     }
-  }, [highlightRoads, map]);
+  }, [highlightRoads, map, violationPolygons]);
 
   useEffect(() => {
     let watchId: number | undefined;
@@ -363,6 +355,7 @@ export default function Dashboard() {
         infoWindow.open(map, newMarker);
       });
 
+      // @ts-expect-error Google Maps types only available at runtime
       setUserMarkers(prev => [...prev, newMarker]);
     }
 
