@@ -1,11 +1,10 @@
 'use client';
 
 import { useEffect, useRef, useState } from "react";
-import Image from "next/image";
 
 function loadGoogleMapsScript(apiKey: string): Promise<void> | undefined {
   if (typeof window === "undefined") return;
-  if ((window as any).google && (window as any).google.maps) return Promise.resolve();
+  if ((window as unknown as { google?: typeof google }).google && (window as unknown as { google?: typeof google }).google.maps) return Promise.resolve();
   return new Promise((resolve, reject) => {
     const script = document.createElement("script");
     script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}`;
@@ -120,7 +119,7 @@ function isNearViolationZone(lat: number, lng: number): boolean {
 }
 
 // Helper function to generate circle path for polygon
-function generateCirclePath(centerLat: number, centerLng: number, radius: number): any[] {
+function generateCirclePath(centerLat: number, centerLng: number, radius: number): google.maps.LatLngLiteral[] {
   const points = [];
   const numPoints = 32;
   
@@ -138,17 +137,17 @@ export default function Dashboard() {
   const mapRef = useRef<HTMLDivElement>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [isDropMode, setIsDropMode] = useState(false);
-  const [map, setMap] = useState<any>(null);
-  const [userMarkers, setUserMarkers] = useState<any[]>([]);
+  const [map, setMap] = useState<google.maps.Map | null>(null);
+  const [userMarkers, setUserMarkers] = useState<google.maps.Marker[]>([]);
   const [showForm, setShowForm] = useState(false);
-  const [selectedLocation, setSelectedLocation] = useState<any>(null);
+  const [selectedLocation, setSelectedLocation] = useState<google.maps.LatLng | null>(null);
   const [showMenu, setShowMenu] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [highlightRoads, setHighlightRoads] = useState(true);
-  const [violationPolygons, setViolationPolygons] = useState<any[]>([]);
+  const [violationPolygons, setViolationPolygons] = useState<google.maps.Polygon[]>([]);
   const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
-  const [userLocationMarker, setUserLocationMarker] = useState<any>(null);
+  const [userLocationMarker, setUserLocationMarker] = useState<google.maps.Marker | null>(null);
   const notifiedZonesRef = useRef<{ [key: string]: number }>({});
 
   const [formData, setFormData] = useState({
@@ -169,14 +168,14 @@ export default function Dashboard() {
   useEffect(() => {
     const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
     if (!apiKey) return; // Don't load if not set
-    let markers: any[] = [];
-    let infoWindow: any = null;
-    let mapInstance: any = null;
+    let markers: google.maps.Marker[] = [];
+    let infoWindow: google.maps.InfoWindow | null = null;
+    let mapInstance: google.maps.Map | null = null;
     
     loadGoogleMapsScript(apiKey)?.then(() => {
-      if (mapRef.current && (window as any).google) {
-        // @ts-ignore
-        mapInstance = new (window as any).google.maps.Map(mapRef.current, {
+      if (mapRef.current && (window as unknown as { google?: typeof google }).google) {
+        // @ts-expect-error
+        mapInstance = new (window as unknown as { google?: typeof google }).google.maps.Map(mapRef.current, {
           center: { lat: 14.5995, lng: 120.9842 },
           zoom: 12,
           disableDefaultUI: true,
@@ -191,12 +190,12 @@ export default function Dashboard() {
             setUserLocation({ lat: latitude, lng: longitude });
             mapInstance.setCenter({ lat: latitude, lng: longitude });
             // Add marker or blue dot
-            const marker = new (window as any).google.maps.Marker({
+            const marker = new (window as unknown as { google?: typeof google }).google.maps.Marker({
               position: { lat: latitude, lng: longitude },
               map: mapInstance,
               title: 'You are here',
               icon: {
-                path: (window as any).google.maps.SymbolPath.CIRCLE,
+                path: (window as unknown as { google?: typeof google }).google.maps.SymbolPath.CIRCLE,
                 scale: 8,
                 fillColor: '#4285F4',
                 fillOpacity: 1,
@@ -209,10 +208,10 @@ export default function Dashboard() {
         }
 
         // Add violation zone markers
-        infoWindow = new (window as any).google.maps.InfoWindow();
+        infoWindow = new (window as unknown as { google?: typeof google }).google.maps.InfoWindow();
         
         markers = VIOLATION_ZONES.map((zone) => {
-          const marker = new (window as any).google.maps.Marker({
+          const marker = new (window as unknown as { google?: typeof google }).google.maps.Marker({
             position: zone.position,
             map: mapInstance,
             title: zone.title,
@@ -223,7 +222,7 @@ export default function Dashboard() {
                   <circle cx="12" cy="12" r="3" fill="#ffffff"/>
                 </svg>
               `),
-              scaledSize: new (window as any).google.maps.Size(36, 36)
+              scaledSize: new (window as unknown as { google?: typeof google }).google.maps.Size(36, 36)
             }
           });
           
@@ -241,7 +240,7 @@ export default function Dashboard() {
         });
 
         // Add click listener for drop mode
-        mapInstance.addListener("click", (event: any) => {
+        mapInstance.addListener("click", (event: google.maps.MapMouseEvent) => {
           if (isDropMode) {
             setSelectedLocation(event.latLng);
             setShowForm(true);
@@ -271,7 +270,7 @@ export default function Dashboard() {
       if (highlightRoads) {
         // Create red-tinted areas that make roads appear red within violation zones
         const newPolygons = VIOLATION_ZONES.map((zone) => {
-          return new (window as any).google.maps.Polygon({
+          return new (window as unknown as { google?: typeof google }).google.maps.Polygon({
             paths: generateCirclePath(zone.position.lat, zone.position.lng, zone.radius),
             strokeColor: '#ff6666',
             strokeOpacity: 0.8,
@@ -319,8 +318,8 @@ export default function Dashboard() {
 
   const handleSearch = () => {
     if (searchQuery.trim() && map) {
-      const geocoder = new (window as any).google.maps.Geocoder();
-      geocoder.geocode({ address: searchQuery + ", Manila, Philippines" }, (results: any, status: any) => {
+      const geocoder = new (window as unknown as { google?: typeof google }).google.maps.Geocoder();
+      geocoder.geocode({ address: searchQuery + ", Manila, Philippines" }, (results: google.maps.GeocoderResult[], status: google.maps.GeocoderStatus) => {
         if (status === 'OK') {
           map.setCenter(results[0].geometry.location);
           map.setZoom(15);
@@ -334,7 +333,7 @@ export default function Dashboard() {
     
     // Create new marker with violation data
     if (selectedLocation && map) {
-      const newMarker = new (window as any).google.maps.Marker({
+      const newMarker = new (window as unknown as { google?: typeof google }).google.maps.Marker({
         position: selectedLocation,
         map: map,
         title: formData.violationType || "User Violation",
@@ -345,12 +344,12 @@ export default function Dashboard() {
               <circle cx="12" cy="12" r="3" fill="#ffffff"/>
             </svg>
           `),
-          scaledSize: new (window as any).google.maps.Size(24, 24)
+          scaledSize: new (window as unknown as { google?: typeof google }).google.maps.Size(24, 24)
         }
       });
 
       // Add click listener to show violation details
-      const infoWindow = new (window as any).google.maps.InfoWindow();
+      const infoWindow = new (window as unknown as { google?: typeof google }).google.maps.InfoWindow();
       newMarker.addListener("click", () => {
         infoWindow.setContent(`
           <div style="background: #171717; color: #ededed; font-family: 'Geist Mono', 'Fira Mono', 'monospace'; border: 1.5px solid #00ff00; border-radius: 8px; box-shadow: 0 2px 12px #000a; padding: 16px; min-width: 220px; max-width: 320px;">
