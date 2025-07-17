@@ -840,7 +840,8 @@ export default function Dashboard() {
           style={{
             backgroundColor: showCrosshair ? '#ffffff' : `${isDarkMode ? '#1a1a1a' : '#ffffff'}e6`,
             border: `1px solid ${showCrosshair ? '#ffffff' : isDarkMode ? '#333333' : '#e5e5e5'}`,
-            color: showCrosshair ? '#000000' : isDarkMode ? '#cccccc' : '#666666'
+            color: showCrosshair ? '#000000' : isDarkMode ? '#cccccc' : '#666666',
+            marginRight: showCrosshair ? '0.5rem' : 0
           }}
           onMouseEnter={(e) => {
             e.currentTarget.style.backgroundColor = '#ffffff';
@@ -865,30 +866,30 @@ export default function Dashboard() {
             <line x1="2" y1="12" x2="22" y2="12" strokeWidth="2" />
           </svg>
         </button>
-          </div>
-
-      {/* Add Violation Zone Button - Bottom of Screen */}
-      {showCrosshair && (
-        <button
-                      onClick={(e) => {
-              // Add click effect - turn red when clicked
+        {/* Add Violation Zone Button - Always Centered Above Bottom Controls */}
+        {showCrosshair && (
+          <button
+            className="fixed left-1/2 transform -translate-x-1/2 px-4 sm:px-6 md:px-8 py-2 sm:py-3 md:py-4 text-white font-medium text-sm sm:text-base rounded-lg sm:rounded-xl border transition-all duration-200 shadow-xl backdrop-blur-sm hover:scale-105 active:scale-95 z-30"
+            style={{
+              backgroundColor: '#ff4444',
+              border: '1px solid #ff4444',
+              color: '#ffffff',
+              transition: 'all 0.2s ease-in-out',
+              minWidth: 'max-content',
+              bottom: '96px', // Default for mobile
+            }}
+            onClick={(e) => {
               e.currentTarget.style.backgroundColor = '#8b0000';
               e.currentTarget.style.borderColor = '#8b0000';
-              
-              // Reset after a short delay
               setTimeout(() => {
-                // Check if the element still exists before modifying its style
                 if (e.currentTarget && e.currentTarget.style) {
                   e.currentTarget.style.backgroundColor = '#ff4444';
                   e.currentTarget.style.borderColor = '#ff4444';
                 }
               }, 150);
-              
               if (map) {
-                // Get the center of the map (where crosshair is pointing)
                 const center = map.getCenter();
                 if (center) {
-                  // Set the selected location and open the violation form
                   setSelectedLocation({ lat: center.lat(), lng: center.lng() });
                   setFormData({ violationType: '', reasons: '', solutions: '' });
                   setShowForm(true);
@@ -896,40 +897,38 @@ export default function Dashboard() {
                 setShowCrosshair(false);
               }
             }}
-          className="absolute bottom-4 sm:bottom-6 md:bottom-8 left-1/2 transform -translate-x-1/2 px-4 sm:px-6 md:px-8 py-2 sm:py-3 md:py-4 text-white font-medium text-sm sm:text-base rounded-lg sm:rounded-xl border transition-all duration-200 shadow-xl backdrop-blur-sm z-10 hover:scale-105 active:scale-95"
-          style={{
-            backgroundColor: '#ff4444',
-            border: '1px solid #ff4444',
-            color: '#ffffff',
-            transition: 'all 0.2s ease-in-out',
-            minWidth: 'max-content'
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.backgroundColor = '#b71c1c';
-            e.currentTarget.style.borderColor = '#b71c1c';
-            e.currentTarget.style.boxShadow = '0 10px 25px rgba(255, 68, 68, 0.3)';
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.backgroundColor = '#ff4444';
-            e.currentTarget.style.borderColor = '#ff4444';
-            e.currentTarget.style.boxShadow = '0 4px 6px rgba(0, 0, 0, 0.1)';
-          }}
-        >
-          <span className="flex items-center gap-2">
-            <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-            </svg>
-            Add Violation Zone
-          </span>
-        </button>
-      )}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.backgroundColor = '#b71c1c';
+              e.currentTarget.style.borderColor = '#b71c1c';
+              e.currentTarget.style.boxShadow = '0 10px 25px rgba(255, 68, 68, 0.3)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.backgroundColor = '#ff4444';
+              e.currentTarget.style.borderColor = '#ff4444';
+              e.currentTarget.style.boxShadow = '0 4px 6px rgba(0, 0, 0, 0.1)';
+            }}
+          >
+            <span className="flex items-center gap-2">
+              <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+              </svg>
+              Add Violation Zone
+            </span>
+            <style>{`
+              @media (min-width: 640px) {
+                .add-violation-btn { bottom: 72px !important; }
+              }
+            `}</style>
+          </button>
+        )}
+      </div>
 
       {/* Centered Crosshair Overlay */}
       {showCrosshair && (
         <div className="fixed inset-0 pointer-events-none z-20">
           {/* Centered Crosshair */}
           <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-6 h-6 pointer-events-none">
-            <svg width="24" height="24" fill="none" viewBox="0 0 24 24" stroke="#ffffff" strokeWidth="2">
+            <svg width="24" height="24" fill="none" viewBox="0 0 24 24" stroke={isDarkMode ? '#ffffff' : '#222'} strokeWidth="2">
               <line x1="12" y1="2" x2="12" y2="22" />
               <line x1="2" y1="12" x2="22" y2="12" />
             </svg>
