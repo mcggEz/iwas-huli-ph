@@ -1,4 +1,9 @@
+/// <reference types="google.maps" />
 'use client';
+
+/**
+ * @typedef {import('google.maps')} google
+ */
 
 import { useEffect, useRef, useState } from "react";
 
@@ -137,7 +142,7 @@ const SOLUTION_OPTIONS = [
 export default function Dashboard() {
   const mapRef = useRef<HTMLDivElement>(null);
   const [searchQuery, setSearchQuery] = useState("");
-  const [map, setMap] = useState<any>(null);
+  const [map, setMap] = useState<google.maps.Map | null>(null);
 
   const [showForm, setShowForm] = useState(false);
   const [selectedLocation, setSelectedLocation] = useState<any>(null);
@@ -147,9 +152,9 @@ export default function Dashboard() {
   const [highlightRoads, setHighlightRoads] = useState(true);
   const [isDrivingMode, setIsDrivingMode] = useState(false);
   const drivingWatchId = useRef<number | null>(null);
-  const [violationPolygons, setViolationPolygons] = useState<any[]>([]);
+  const [violationPolygons, setViolationPolygons] = useState<google.maps.Polygon[]>([]);
   const [, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
-  const [userLocationMarker, setUserLocationMarker] = useState<any>(null);
+  const [userLocationMarker, setUserLocationMarker] = useState<google.maps.Marker | null>(null);
   const notifiedZonesRef = useRef<{ [key: string]: number }>({});
 
   // State for selected violation (for side panel)
@@ -285,7 +290,9 @@ export default function Dashboard() {
               
               const { latitude, longitude } = position.coords;
               setUserLocation({ lat: latitude, lng: longitude });
-              map.setCenter({ lat: latitude, lng: longitude });
+              if (map) {
+                map.setCenter({ lat: latitude, lng: longitude });
+              }
               
               // Create user location marker
               const marker = new (window as any).google.maps.Marker({

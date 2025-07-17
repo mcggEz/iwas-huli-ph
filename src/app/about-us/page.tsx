@@ -1,5 +1,7 @@
 "use client";
 
+import Link from 'next/link';
+
 export default function Home() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-[#1a1a1a] via-[#0f0f0f] to-[#1a1a1a]">
@@ -38,7 +40,7 @@ export default function Home() {
           
           {/* CTA Buttons */}
           <div className="flex flex-col sm:flex-row gap-4 sm:gap-6 justify-center items-center w-full">
-            <a
+            <Link
               href="/" 
               className="w-full sm:w-auto px-8 sm:px-10 py-4 sm:py-5 bg-gradient-to-r from-[#ff4444] to-[#b71c1c] text-white font-semibold rounded-xl hover:from-[#b71c1c] hover:to-[#8b0000] transition-all duration-300 transform hover:scale-105 shadow-xl hover:shadow-2xl font-medium text-lg sm:text-xl"
             >
@@ -46,9 +48,9 @@ export default function Home() {
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
                 </svg>
-                Go back to the App
+                Use the App
               </span>
-            </a>
+            </Link>
           </div>
         </div>
       </section>

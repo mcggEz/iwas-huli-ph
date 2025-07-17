@@ -1,10 +1,12 @@
+import { NextApiRequest, NextApiResponse } from 'next';
+
 interface RateLimitConfig {
   windowMs: number; // Time window in milliseconds
   maxRequests: number; // Maximum requests per window
   skipSuccessfulRequests?: boolean; // Skip counting successful requests
   skipFailedRequests?: boolean; // Skip counting failed requests
-  keyGenerator?: (req: any) => string; // Function to generate unique keys
-  handler?: (req: any, res: any) => void; // Custom handler for rate limit exceeded
+  keyGenerator?: (req: NextApiRequest) => string; // Function to generate unique keys
+  handler?: (req: NextApiRequest, res: NextApiResponse) => void; // Custom handler for rate limit exceeded
 }
 
 interface RateLimitStore {
@@ -22,7 +24,7 @@ class RateLimiter {
     this.config = {
       skipSuccessfulRequests: false,
       skipFailedRequests: false,
-      keyGenerator: (req: any) => req.ip || req.connection.remoteAddress || 'unknown',
+      keyGenerator: (req: NextApiRequest) => (req as any).ip || (req.connection as any)?.remoteAddress || req.headers['x-forwarded-for'] || 'unknown',
       ...config,
     };
   }
@@ -38,12 +40,12 @@ class RateLimiter {
   }
 
   // Get client identifier
-  private getKey(req: any): string {
+  private getKey(req: NextApiRequest): string {
     return this.config.keyGenerator!(req);
   }
 
   // Check if request is within rate limit
-  public check(req: any): { allowed: boolean; remaining: number; resetTime: number } {
+  public check(req: NextApiRequest): { allowed: boolean; remaining: number; resetTime: number } {
     this.cleanup();
     
     const key = this.getKey(req);
