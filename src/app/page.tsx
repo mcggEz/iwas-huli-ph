@@ -6,6 +6,8 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import { fetchViolationZones, createViolationZone, subscribeToViolationZones } from "../lib/violation-zones";
+import { ViolationZone } from "../lib/supabase";
 
 
 function loadGoogleMapsScript(apiKey: string): Promise<void> | undefined {
@@ -13,7 +15,7 @@ function loadGoogleMapsScript(apiKey: string): Promise<void> | undefined {
   if ((window as any).google && (window as any).google.maps) return Promise.resolve();
   return new Promise((resolve, reject) => {
     const script = document.createElement("script");
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}`;
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places`;
     script.async = true;
     script.onload = () => resolve();
     script.onerror = reject;
@@ -153,7 +155,7 @@ export default function Dashboard() {
   const [isDrivingMode, setIsDrivingMode] = useState(false);
   const drivingWatchId = useRef<number | null>(null);
   const [violationPolygons, setViolationPolygons] = useState<google.maps.Polygon[]>([]);
-  const [, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
+  const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
   const [userLocationMarker, setUserLocationMarker] = useState<google.maps.Marker | null>(null);
   const notifiedZonesRef = useRef<{ [key: string]: number }>({});
 
@@ -161,13 +163,20 @@ export default function Dashboard() {
   const [selectedViolation, setSelectedViolation] = useState<any>(null);
   // State for selected address
   const [selectedAddress, setSelectedAddress] = useState('');
-  // Store all violation reports
-  const [violationReports, setViolationReports] = useState<any[]>([]);
+  // Store all violation zones from database
+  const [violationZones, setViolationZones] = useState<ViolationZone[]>([]);
   // State for showing the graph
   const [showGraph, setShowGraph] = useState(false);
   // State for showing the mobile app panel
   const [showMobileAppPanel, setShowMobileAppPanel] = useState(false);
   const [showCrosshair, setShowCrosshair] = useState(false);
+  const [showUserLocation, setShowUserLocation] = useState(false);
+  const [showDirections, setShowDirections] = useState(false);
+  const [directionsData, setDirectionsData] = useState<any>(null);
+  const [directionsRenderer, setDirectionsRenderer] = useState<any>(null);
+  const [origin, setOrigin] = useState('');
+  const [destination, setDestination] = useState('');
+  const [isCalculatingRoute, setIsCalculatingRoute] = useState(false);
 
   // Settings state
   const [proximityAlerts, setProximityAlerts] = useState(true);
@@ -176,6 +185,10 @@ export default function Dashboard() {
   const [alertDistance, setAlertDistance] = useState(200);
   const [language, setLanguage] = useState('en');
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
+  
+  // Permission states
+  const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>('default');
+  const [vibrationSupported, setVibrationSupported] = useState(false);
 
   const [formData, setFormData] = useState({
     violationType: "",
@@ -211,6 +224,44 @@ export default function Dashboard() {
 
   const theme = isDarkMode ? DARK_THEME : LIGHT_THEME;
 
+  // Check permissions and capabilities on mount
+  useEffect(() => {
+    // Check notification permission
+    if ('Notification' in window) {
+      setNotificationPermission(Notification.permission);
+    }
+    
+    // Check vibration support
+    if ('vibrate' in navigator) {
+      setVibrationSupported(true);
+    }
+  }, []);
+
+  // Load violation zones from database
+  useEffect(() => {
+    const loadViolationZones = async () => {
+      const zones = await fetchViolationZones();
+      setViolationZones(zones);
+    };
+
+    loadViolationZones();
+  }, []);
+
+  // Subscribe to real-time updates
+  useEffect(() => {
+    const subscription = subscribeToViolationZones((payload) => {
+      if (payload.eventType === 'INSERT') {
+        setViolationZones(prev => [payload.new, ...prev]);
+      } else if (payload.eventType === 'DELETE') {
+        setViolationZones(prev => prev.filter(zone => zone.id !== payload.old.id));
+      }
+    });
+
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, []);
+
   // Initialize map
   useEffect(() => {
     const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
@@ -239,12 +290,212 @@ export default function Dashboard() {
     return () => {};
   }, [isDarkMode, highlightRoads, showLandmarks]);
 
+  // Render violation zones on map when data changes
+  useEffect(() => {
+    if (!map) return;
+    // Remove all existing markers and polygons
+    if ((window as any).violationZoneMarkers) {
+      (window as any).violationZoneMarkers.forEach((m: any) => m.setMap(null));
+    }
+    if ((window as any).violationZonePolygons) {
+      (window as any).violationZonePolygons.forEach((p: any) => p.setMap(null));
+    }
+    (window as any).violationZoneMarkers = [];
+    (window as any).violationZonePolygons = [];
+
+    if (!highlightRoads) return;
+    if (violationZones.length === 0) return;
+
+    // Add violation zone markers and polygons
+    violationZones.forEach((zone: ViolationZone) => {
+      // Create marker
+      const marker = new (window as any).google.maps.Marker({
+        position: { lat: zone.lat, lng: zone.lng },
+        map: map,
+        title: zone.violation_type,
+        icon: {
+          url: 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(`
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <circle cx="12" cy="12" r="8" fill="#ff4444" stroke="#ffffff" stroke-width="2"/>
+              <circle cx="12" cy="12" r="3" fill="#ffffff"/>
+            </svg>
+          `),
+          scaledSize: new (window as any).google.maps.Size(24, 24)
+        }
+      });
+      marker.setMap(map);
+      (window as any).violationZoneMarkers.push(marker);
+
+      // Add click listener to show violation details
+      marker.addListener("click", () => {
+        setSelectedViolation({
+          type: zone.violation_type,
+          reasons: zone.reasons,
+          solutions: zone.solutions,
+          lat: zone.lat,
+          lng: zone.lng,
+        });
+      });
+
+      // Create violation zone polygon (red circle)
+      const polygon = new (window as any).google.maps.Polygon({
+        paths: generateCirclePath(zone.lat, zone.lng, 50), // 50 meter radius
+        strokeColor: '#ff4444',
+        strokeOpacity: 0.8,
+        strokeWeight: 2,
+        fillColor: '#ff4444',
+        fillOpacity: 0.2,
+        map: map
+      });
+      polygon.setMap(map);
+      (window as any).violationZonePolygons.push(polygon);
+    });
+
+    // Cleanup function
+    return () => {
+      if ((window as any).violationZoneMarkers) {
+        (window as any).violationZoneMarkers.forEach((m: any) => m.setMap(null));
+      }
+      if ((window as any).violationZonePolygons) {
+        (window as any).violationZonePolygons.forEach((p: any) => p.setMap(null));
+      }
+    };
+  }, [map, violationZones, highlightRoads]);
+
+  // Add Places Autocomplete to search input
+  useEffect(() => {
+    if (!map || !(window as any).google) return;
+    
+    const input = document.querySelector('input[placeholder="Search location..."]') as HTMLInputElement;
+    if (!input) return;
+
+    const autocomplete = new (window as any).google.maps.places.Autocomplete(input, {
+      types: ['geocode'],
+      componentRestrictions: { country: 'ph' }, // restrict to Philippines
+    });
+
+    autocomplete.addListener('place_changed', () => {
+      const place = autocomplete.getPlace();
+      if (place.geometry && place.geometry.location) {
+        map.setCenter(place.geometry.location);
+        map.setZoom(15);
+        console.log('✅ Map centered on:', place.formatted_address);
+      }
+    });
+
+    return () => {
+      // Cleanup not needed for autocomplete
+    };
+  }, [map]);
+
+  // Add Places Autocomplete to directions inputs
+  useEffect(() => {
+    if (!map || !(window as any).google || !showDirections) return;
+    
+    // Wait a bit for the DOM to be ready
+    setTimeout(() => {
+      const originInput = document.querySelector('input[placeholder="Enter starting location..."]') as HTMLInputElement;
+      const destinationInput = document.querySelector('input[placeholder="Enter destination..."]') as HTMLInputElement;
+      
+      if (originInput) {
+        const originAutocomplete = new (window as any).google.maps.places.Autocomplete(originInput, {
+          types: ['geocode'],
+          componentRestrictions: { country: 'ph' },
+        });
+
+        originAutocomplete.addListener('place_changed', () => {
+          const place = originAutocomplete.getPlace();
+          if (place.formatted_address) {
+            setOrigin(place.formatted_address);
+            console.log('✅ Origin set to:', place.formatted_address);
+          }
+        });
+      }
+      
+      if (destinationInput) {
+        const destinationAutocomplete = new (window as any).google.maps.places.Autocomplete(destinationInput, {
+          types: ['geocode'],
+          componentRestrictions: { country: 'ph' },
+        });
+
+        destinationAutocomplete.addListener('place_changed', () => {
+          const place = destinationAutocomplete.getPlace();
+          if (place.formatted_address) {
+            setDestination(place.formatted_address);
+            console.log('✅ Destination set to:', place.formatted_address);
+          }
+        });
+      }
+    }, 100);
+
+    return () => {
+      // Cleanup not needed for autocomplete
+    };
+  }, [map, showDirections]);
+
   // Update map styles when theme changes
   useEffect(() => {
     if (map) {
       map.setOptions({ styles: generateMapStyles() });
     }
   }, [isDarkMode, showLandmarks]);
+
+  // Initialize Directions Renderer
+  useEffect(() => {
+    if (!map || !(window as any).google) {
+      console.log('❌ Cannot initialize directions renderer:', { hasMap: !!map, hasGoogle: !!(window as any).google });
+      return;
+    }
+    
+    console.log('🔧 Initializing directions renderer...');
+    
+    const renderer = new (window as any).google.maps.DirectionsRenderer({
+      map: map,
+      suppressMarkers: false,
+      polylineOptions: {
+        strokeColor: '#3B82F6',
+        strokeWeight: 8,
+        strokeOpacity: 1,
+        icons: [{
+          icon: {
+            path: (window as any).google.maps.SymbolPath.FORWARD_CLOSED_ARROW,
+            scale: 4,
+            strokeColor: '#ffffff',
+            fillColor: '#3B82F6',
+            fillOpacity: 1
+          },
+          offset: '50%',
+          repeat: '80px'
+        }]
+      }
+    });
+    
+    console.log('✅ Directions renderer created:', renderer);
+    setDirectionsRenderer(renderer);
+    
+    return () => {
+      if (renderer) {
+        console.log('🧹 Cleaning up directions renderer');
+        renderer.setMap(null);
+      }
+    };
+  }, [map]);
+
+  // Only clear directions when component unmounts or map changes
+  useEffect(() => {
+    return () => {
+      if (directionsRenderer) {
+        directionsRenderer.setDirections({ routes: [] });
+        setDirectionsData(null);
+        
+        // Clear direction markers
+        if ((window as any).directionMarkers) {
+          (window as any).directionMarkers.forEach((marker: any) => marker.setMap(null));
+          (window as any).directionMarkers = [];
+        }
+      }
+    };
+  }, [directionsRenderer]);
 
   // Manage violation zone highlighting when toggled
   useEffect(() => {
@@ -291,7 +542,7 @@ export default function Dashboard() {
               const { latitude, longitude } = position.coords;
               setUserLocation({ lat: latitude, lng: longitude });
               if (map) {
-                map.setCenter({ lat: latitude, lng: longitude });
+              map.setCenter({ lat: latitude, lng: longitude });
               }
               
               // Create user location marker
@@ -386,7 +637,7 @@ export default function Dashboard() {
         drivingWatchId.current = null;
       }
     };
-  }, [isDrivingMode, map, proximityAlerts, alertDistance, violationReports]);
+  }, [isDrivingMode, map, proximityAlerts, alertDistance, violationZones]);
 
   // User location marker will be managed by driving mode
 
@@ -437,16 +688,98 @@ export default function Dashboard() {
     triggerVibration();
   };
 
+  // Permission request handlers
+  const requestNotificationPermission = async () => {
+    if (!('Notification' in window)) {
+      alert('Notifications are not supported in this browser.');
+      return false;
+    }
+
+    try {
+      const permission = await Notification.requestPermission();
+      setNotificationPermission(permission);
+      
+      if (permission === 'granted') {
+        console.log('✅ Notification permission granted');
+        return true;
+      } else if (permission === 'denied') {
+        alert('Notification permission denied. Please enable notifications in your browser settings to receive alerts.');
+        return false;
+      } else {
+        console.log('Notification permission request dismissed');
+        return false;
+      }
+    } catch (error) {
+      console.error('Error requesting notification permission:', error);
+      alert('Failed to request notification permission.');
+      return false;
+    }
+  };
+
+  // Enhanced toggle handlers with permission requests
+  const handleNotificationsToggle = async () => {
+    if (!notificationsEnabled) {
+      // Turning ON notifications - request permission
+      const permissionGranted = await requestNotificationPermission();
+      if (permissionGranted) {
+        setNotificationsEnabled(true);
+      }
+    } else {
+      // Turning OFF notifications
+      setNotificationsEnabled(false);
+    }
+  };
+
+  const handleSoundAlertsToggle = async () => {
+    if (!soundAlerts) {
+      // Turning ON sound alerts - test if audio works
+      try {
+        const audio = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hVFApGn+DyvmwhBSuBzvLZiTYIG2m98OScTgwOUarm7blmGgU7k9n1unEiBC13yO/eizEIHWq+8+OWT');
+        audio.volume = 0.1;
+        await audio.play();
+        setSoundAlerts(true);
+        console.log('✅ Sound alerts enabled');
+      } catch (error) {
+        console.error('❌ Sound test failed:', error);
+        alert('Sound alerts are not supported or blocked in this browser.');
+      }
+    } else {
+      // Turning OFF sound alerts
+      setSoundAlerts(false);
+    }
+  };
+
+  const handleVibrationAlertsToggle = async () => {
+    if (!vibrationAlerts) {
+      // Turning ON vibration alerts - test if vibration works
+      if (vibrationSupported) {
+        try {
+          navigator.vibrate([100]);
+          setVibrationAlerts(true);
+          console.log('✅ Vibration alerts enabled');
+        } catch (error) {
+          console.error('❌ Vibration test failed:', error);
+          alert('Vibration is not supported on this device.');
+        }
+      } else {
+        alert('Vibration is not supported on this device.');
+      }
+    } else {
+      // Turning OFF vibration alerts
+      setVibrationAlerts(false);
+    }
+  };
+
   // Function to check proximity to violation zones
   const checkProximityToViolations = (userLat: number, userLng: number) => {
     if (!proximityAlerts || !isDrivingMode) return;
 
-    violationReports.forEach((violation, index) => {
+    violationZones.forEach((violation: ViolationZone) => {
       const distance = calculateDistance(userLat, userLng, violation.lat, violation.lng);
       
       if (distance <= alertDistance) {
         const title = 'Violation Zone Ahead!';
-        const body = `${violation.type} violation zone detected within ${Math.round(distance)}m`;
+        const body = `${violation.violation_type} violation zone detected within ${Math.round(distance)}m`;
         triggerAlerts(title, body);
       }
     });
@@ -464,7 +797,7 @@ export default function Dashboard() {
     }
   };
 
-  const handleFormSubmit = (e: React.FormEvent) => {
+  const handleFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
     // Create violation zone circle and marker only when form is submitted
@@ -509,18 +842,20 @@ export default function Dashboard() {
         });
       });
 
-     // Add this report to the violationReports array
-     setViolationReports(prev => [
-       ...prev,
-       {
-         type: formData.violationType,
+     // Save violation zone to database
+     const newViolationZone = await createViolationZone({
+       violation_type: formData.violationType,
          reasons: formData.reasons,
          solutions: formData.solutions,
          lat: selectedLocation.lat,
          lng: selectedLocation.lng,
-         timestamp: Date.now(),
-       }
-     ]);
+     });
+
+     if (newViolationZone) {
+       console.log('✅ Violation zone saved to database');
+     } else {
+       console.error('❌ Failed to save violation zone to database');
+     }
 
     }
 
@@ -582,6 +917,121 @@ export default function Dashboard() {
     }
   };
 
+  // Calculate directions
+  const calculateDirections = async () => {
+    if (!origin || !destination || !directionsRenderer || !(window as any).google) {
+      console.log('❌ Missing required data:', { origin, destination, hasRenderer: !!directionsRenderer, hasGoogle: !!(window as any).google });
+      return;
+    }
+
+    console.log('🚀 Starting directions calculation...');
+    setIsCalculatingRoute(true);
+
+    try {
+      const directionsService = new (window as any).google.maps.DirectionsService();
+      
+      const request = {
+        origin: origin,
+        destination: destination,
+        travelMode: (window as any).google.maps.TravelMode.DRIVING,
+        unitSystem: (window as any).google.maps.UnitSystem.METRIC,
+        avoidHighways: false,
+        avoidTolls: false
+      };
+
+      console.log('📋 Directions request:', request);
+
+      const result = await new Promise((resolve, reject) => {
+        directionsService.route(request, (result: any, status: any) => {
+          console.log('📡 Directions API response:', { status, hasResult: !!result });
+          if (status === 'OK') {
+            resolve(result);
+          } else {
+            reject(new Error(`Directions request failed due to ${status}`));
+          }
+        });
+      });
+
+      console.log('✅ Directions result received:', result);
+      
+      // Set the directions on the renderer
+      directionsRenderer.setDirections(result);
+      console.log('🎯 Directions set on renderer');
+      
+      setDirectionsData(result);
+      
+      // Add additional direction indicators
+      if ((result as any).routes && (result as any).routes.length > 0) {
+        const route = (result as any).routes[0];
+        const path = route.overview_path;
+        
+        console.log('🛣️ Route path points:', path.length);
+        
+        // Clear previous direction markers
+        if ((window as any).directionMarkers) {
+          (window as any).directionMarkers.forEach((marker: any) => marker.setMap(null));
+        }
+        (window as any).directionMarkers = [];
+        
+        // Add simple arrow markers along the route
+        for (let i = 0; i < path.length; i += Math.max(1, Math.floor(path.length / 8))) {
+          const point = path[i];
+          
+          const directionMarker = new (window as any).google.maps.Marker({
+            position: point,
+            map: map,
+            icon: {
+              path: (window as any).google.maps.SymbolPath.FORWARD_CLOSED_ARROW,
+              scale: 2,
+              strokeColor: '#ffffff',
+              fillColor: '#3B82F6',
+              fillOpacity: 0.8
+            },
+            zIndex: 1000
+          });
+          
+          (window as any).directionMarkers.push(directionMarker);
+        }
+        
+        console.log('📍 Added direction markers:', (window as any).directionMarkers.length);
+      }
+      
+      console.log('✅ Directions calculated successfully');
+    } catch (error) {
+      console.error('❌ Error calculating directions:', error);
+      alert('Failed to calculate directions. Please check your input and try again.');
+    } finally {
+      setIsCalculatingRoute(false);
+    }
+  };
+
+
+
+  // Use current location as origin
+  const useCurrentLocation = () => {
+    if (userLocation) {
+      setOrigin(`${userLocation.lat}, ${userLocation.lng}`);
+    } else {
+      alert('Please enable location access first');
+    }
+  };
+
+  // Clear the current route
+  const clearRoute = () => {
+    if (directionsRenderer) {
+      directionsRenderer.setDirections({ routes: [] });
+      setDirectionsData(null);
+      
+      // Clear direction markers
+      if ((window as any).directionMarkers) {
+        (window as any).directionMarkers.forEach((marker: any) => marker.setMap(null));
+        (window as any).directionMarkers = [];
+      }
+      
+      console.log('🗑️ Route cleared');
+    }
+  };
+
   return (
     <div
       className="fixed inset-0 w-screen h-screen overflow-hidden"
@@ -592,7 +1042,7 @@ export default function Dashboard() {
       {/* Map background */}
       <div ref={mapRef} className="absolute inset-0 w-full h-full" />
       
-      {/* Top Bar: Search + Hamburger in one row */}
+      {/* Top Bar: Search + Directions + Hamburger in one row */}
       <div className="absolute top-2 sm:top-4 md:top-6 left-1/2 -translate-x-1/2 w-full max-w-[95%] sm:max-w-2xl lg:max-w-4xl z-10 flex flex-row items-center justify-center gap-x-1 sm:gap-x-2 px-2 sm:px-0">
         {/* Search Bar */}
         <div className="flex items-center flex-1 rounded-lg sm:rounded-xl px-2 sm:px-4 py-2 sm:py-3 shadow-lg backdrop-blur-sm" style={{ 
@@ -626,6 +1076,38 @@ export default function Dashboard() {
             }}
           >
             Search
+          </button>
+          </div>
+
+        {/* Directions Button */}
+        <div className="flex-shrink-0">
+          <button
+            onClick={() => setShowDirections(!showDirections)}
+            className="rounded-lg sm:rounded-xl w-10 sm:w-12 h-10 sm:h-12 flex items-center justify-center transition-all duration-200 hover:scale-105 shadow-lg backdrop-blur-sm mr-1 sm:mr-2"
+            style={{
+              backgroundColor: showDirections ? '#3B82F6' : `${isDarkMode ? '#1a1a1a' : '#ffffff'}e6`,
+              border: `1px solid ${showDirections ? '#3B82F6' : isDarkMode ? '#333333' : '#e5e5e5'}`,
+              color: showDirections ? '#ffffff' : isDarkMode ? '#cccccc' : '#666666'
+            }}
+            onMouseEnter={(e) => {
+              if (!showDirections) {
+                e.currentTarget.style.backgroundColor = '#3B82F6';
+                e.currentTarget.style.color = '#fff';
+                e.currentTarget.style.borderColor = '#3B82F6';
+              }
+            }}
+            onMouseLeave={(e) => {
+              if (!showDirections) {
+                e.currentTarget.style.backgroundColor = `${isDarkMode ? '#1a1a1a' : '#ffffff'}e6`;
+                e.currentTarget.style.color = isDarkMode ? '#cccccc' : '#666666';
+                e.currentTarget.style.borderColor = isDarkMode ? '#333333' : '#e5e5e5';
+              }
+            }}
+            title={showDirections ? "Directions ON" : "Directions OFF"}
+          >
+            <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-1.447-.894L15 4m0 13V4m-6 3l6-3" />
+            </svg>
           </button>
           </div>
 
@@ -793,27 +1275,89 @@ export default function Dashboard() {
                 <path d="M12 4L2 20h20L12 4z" stroke={iconColor} fill="none" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
                 <line x1="12" y1="9" x2="12" y2="14" stroke={iconColor} strokeWidth="2" strokeLinecap="round"/>
                 <circle cx="12" cy="17" r="1.2" fill={iconColor} />
-              </svg>
+        </svg>
             );
           })()}
       </button>
 
-        {/* Driving Mode Toggle Button */}
+        {/* Location Access Button */}
       <button
-                        onClick={handleDrivingModeToggle}
+          onClick={async () => {
+            if (!showUserLocation) {
+              // Turn ON location tracking
+              try {
+                console.log('Requesting geolocation permission...');
+                navigator.geolocation.getCurrentPosition(
+                  (position) => {
+                    console.log('✅ Geolocation permission granted');
+                    console.log('User location:', position.coords);
+                    
+                    const { latitude, longitude } = position.coords;
+                    setUserLocation({ lat: latitude, lng: longitude });
+                    if (map) {
+                      map.setCenter({ lat: latitude, lng: longitude });
+                    }
+                    
+                    // Create user location marker
+                    const marker = new (window as any).google.maps.Marker({
+                      position: { lat: latitude, lng: longitude },
+                      map: map,
+                      title: 'You are here',
+                      icon: {
+                        path: (window as any).google.maps.SymbolPath.CIRCLE,
+                        scale: 8,
+                        fillColor: '#4285F4',
+                        fillOpacity: 1,
+                        strokeColor: '#ffffff',
+                        strokeWeight: 2
+                      }
+                    });
+                    setUserLocationMarker(marker);
+                    setShowUserLocation(true);
+                    
+                    console.log('Location tracking enabled!');
+                  },
+                  (error) => {
+                    console.error('❌ Geolocation error:', error);
+                    alert('Unable to access your location. Please check your browser settings.');
+                  },
+                  {
+                    enableHighAccuracy: true,
+                    timeout: 10000,
+                    maximumAge: 300000
+                  }
+                );
+              } catch (error) {
+                console.error('❌ Location access error:', error);
+                alert('Location access failed. Please try again.');
+              }
+            } else {
+              // Turn OFF location tracking
+              console.log('Turning off location tracking...');
+              if (userLocationMarker) {
+                userLocationMarker.setMap(null);
+                setUserLocationMarker(null);
+              }
+              setUserLocation(null);
+              setShowUserLocation(false);
+              console.log('Location tracking disabled!');
+            }
+          }}
           className="rounded-lg sm:rounded-xl w-12 sm:w-14 md:w-16 h-12 sm:h-14 md:h-16 flex items-center justify-center transition-all duration-200 hover:scale-105 shadow-lg backdrop-blur-sm"
         style={{
-            backgroundColor: isDrivingMode ? '#4285F4' : `${isDarkMode ? '#1a1a1a' : '#ffffff'}e6`,
-            border: `1px solid ${isDrivingMode ? '#4285F4' : isDarkMode ? '#333333' : '#e5e5e5'}`,
-            color: isDrivingMode ? '#fff' : isDarkMode ? '#cccccc' : '#666666'
+            backgroundColor: showUserLocation ? '#4285F4' : `${isDarkMode ? '#1a1a1a' : '#ffffff'}e6`,
+            border: `1px solid ${showUserLocation ? '#4285F4' : isDarkMode ? '#333333' : '#e5e5e5'}`,
+            color: showUserLocation ? '#fff' : isDarkMode ? '#cccccc' : '#666666'
         }}
         onMouseEnter={(e) => {
+            if (!showUserLocation) {
           e.currentTarget.style.backgroundColor = '#4285F4';
           e.currentTarget.style.color = '#fff';
             e.currentTarget.style.borderColor = '#4285F4';
+            }
         }}
         onMouseLeave={(e) => {
-          if (isDrivingMode) {
+            if (showUserLocation) {
             e.currentTarget.style.backgroundColor = '#4285F4';
             e.currentTarget.style.color = '#fff';
               e.currentTarget.style.borderColor = '#4285F4';
@@ -823,15 +1367,49 @@ export default function Dashboard() {
               e.currentTarget.style.borderColor = isDarkMode ? '#333333' : '#e5e5e5';
           }
         }}
-        title={isDrivingMode ? "Driving Mode ON" : "Driving Mode OFF"}
+          title={showUserLocation ? "Location Tracking ON" : "Location Tracking OFF"}
       >
           <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <rect x="4" y="11" width="16" height="7" rx="2" strokeWidth="2" />
-          <circle cx="7.5" cy="18.5" r="1.5" />
-          <circle cx="16.5" cy="18.5" r="1.5" />
-          <rect x="7" y="7" width="10" height="4" rx="2" strokeWidth="2" />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
         </svg>
       </button>
+
+        {/* Center Map Button - Only shows when location is enabled */}
+        {showUserLocation && (
+          <button
+            onClick={() => {
+              if (userLocation && map) {
+                map.setCenter({ lat: userLocation.lat, lng: userLocation.lng });
+                map.setZoom(15);
+                console.log('Map centered on user location');
+              }
+            }}
+            className="rounded-lg sm:rounded-xl w-12 sm:w-14 md:w-16 h-12 sm:h-14 md:h-16 flex items-center justify-center transition-all duration-200 hover:scale-105 shadow-lg backdrop-blur-sm"
+            style={{
+              backgroundColor: `${isDarkMode ? '#1a1a1a' : '#ffffff'}e6`,
+              border: `1px solid ${isDarkMode ? '#333333' : '#e5e5e5'}`,
+              color: isDarkMode ? '#cccccc' : '#666666'
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.backgroundColor = '#10B981';
+              e.currentTarget.style.color = '#fff';
+              e.currentTarget.style.borderColor = '#10B981';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.backgroundColor = `${isDarkMode ? '#1a1a1a' : '#ffffff'}e6`;
+              e.currentTarget.style.color = isDarkMode ? '#cccccc' : '#666666';
+              e.currentTarget.style.borderColor = isDarkMode ? '#333333' : '#e5e5e5';
+            }}
+            title="Center Map on My Location"
+          >
+            <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-1.447-.894L15 4m0 13V4m-6 3l6-3" />
+            </svg>
+          </button>
+        )}
+
+
 
         {/* Crosshair Button */}
         <button
@@ -866,19 +1444,21 @@ export default function Dashboard() {
             <line x1="2" y1="12" x2="22" y2="12" strokeWidth="2" />
           </svg>
         </button>
-        {/* Add Violation Zone Button - Always Centered Above Bottom Controls */}
-        {showCrosshair && (
-          <button
-            className="fixed left-1/2 transform -translate-x-1/2 px-4 sm:px-6 md:px-8 py-2 sm:py-3 md:py-4 text-white font-medium text-sm sm:text-base rounded-lg sm:rounded-xl border transition-all duration-200 shadow-xl backdrop-blur-sm hover:scale-105 active:scale-95 z-30"
-            style={{
-              backgroundColor: '#ff4444',
-              border: '1px solid #ff4444',
-              color: '#ffffff',
-              transition: 'all 0.2s ease-in-out',
-              minWidth: 'max-content',
-              bottom: '96px', // Default for mobile
-            }}
-            onClick={(e) => {
+          </div>
+
+      {/* Add Violation Zone Button - Always Centered Above Bottom Controls */}
+      {showCrosshair && (
+        <button
+          className="fixed left-1/2 transform -translate-x-1/2 px-4 sm:px-6 md:px-8 py-2 sm:py-3 md:py-4 text-white font-medium text-sm sm:text-base rounded-lg sm:rounded-xl border transition-all duration-200 shadow-xl backdrop-blur-sm hover:scale-105 active:scale-95 z-30"
+          style={{
+            backgroundColor: '#ff4444',
+            border: '1px solid #ff4444',
+            color: '#ffffff',
+            transition: 'all 0.2s ease-in-out',
+            minWidth: 'max-content',
+            bottom: '96px', // Default for mobile
+          }}
+                      onClick={(e) => {
               e.currentTarget.style.backgroundColor = '#8b0000';
               e.currentTarget.style.borderColor = '#8b0000';
               setTimeout(() => {
@@ -896,32 +1476,31 @@ export default function Dashboard() {
                 }
                 setShowCrosshair(false);
               }
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.backgroundColor = '#b71c1c';
-              e.currentTarget.style.borderColor = '#b71c1c';
-              e.currentTarget.style.boxShadow = '0 10px 25px rgba(255, 68, 68, 0.3)';
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.backgroundColor = '#ff4444';
-              e.currentTarget.style.borderColor = '#ff4444';
-              e.currentTarget.style.boxShadow = '0 4px 6px rgba(0, 0, 0, 0.1)';
-            }}
-          >
-            <span className="flex items-center gap-2">
-              <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-              </svg>
-              Add Violation Zone
-            </span>
-            <style>{`
-              @media (min-width: 640px) {
-                .add-violation-btn { bottom: 72px !important; }
-              }
-            `}</style>
-          </button>
-        )}
-      </div>
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.backgroundColor = '#b71c1c';
+            e.currentTarget.style.borderColor = '#b71c1c';
+            e.currentTarget.style.boxShadow = '0 10px 25px rgba(255, 68, 68, 0.3)';
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.backgroundColor = '#ff4444';
+            e.currentTarget.style.borderColor = '#ff4444';
+            e.currentTarget.style.boxShadow = '0 4px 6px rgba(0, 0, 0, 0.1)';
+          }}
+        >
+          <span className="flex items-center gap-2">
+            <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+            </svg>
+            Add Violation Zone
+          </span>
+          <style>{`
+            @media (min-width: 640px) {
+              .add-violation-btn { bottom: 72px !important; }
+            }
+          `}</style>
+        </button>
+      )}
 
       {/* Centered Crosshair Overlay */}
       {showCrosshair && (
@@ -1001,12 +1580,12 @@ export default function Dashboard() {
                     if (e.target.value !== 'Other') setViolationTypeOther('');
                   }}
                   required
-                  className="w-full p-4 rounded-lg border transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-red-500"
-                  style={{ 
-                    backgroundColor: isDarkMode ? '#1a1a1a' : '#ffffff',
-                    borderColor: isDarkMode ? '#333333' : '#e5e5e5',
-                    color: isDarkMode ? '#ffffff' : '#1a1a1a'
-                  }}
+                    className="w-full p-4 rounded-lg border transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-red-500"
+                    style={{ 
+                      backgroundColor: isDarkMode ? '#1a1a1a' : '#ffffff',
+                      borderColor: isDarkMode ? '#333333' : '#e5e5e5',
+                      color: isDarkMode ? '#ffffff' : '#1a1a1a'
+                    }}
                 >
                   <option value="">Select violation type</option>
                   {VIOLATION_TYPES.filter(type => type !== 'Other').map((type) => (
@@ -1043,11 +1622,11 @@ export default function Dashboard() {
                   }}
                   required
                   className="w-full p-4 rounded-lg border transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-red-500"
-                  style={{ 
-                    backgroundColor: isDarkMode ? '#1a1a1a' : '#ffffff',
-                    borderColor: isDarkMode ? '#333333' : '#e5e5e5',
-                    color: isDarkMode ? '#ffffff' : '#1a1a1a'
-                  }}
+                    style={{ 
+                      backgroundColor: isDarkMode ? '#1a1a1a' : '#ffffff',
+                      borderColor: isDarkMode ? '#333333' : '#e5e5e5',
+                      color: isDarkMode ? '#ffffff' : '#1a1a1a'
+                    }}
                 >
                   <option value="">Select reason</option>
                   {REASON_OPTIONS.map(opt => (
@@ -1081,11 +1660,11 @@ export default function Dashboard() {
                   }}
                   required
                   className="w-full p-4 rounded-lg border transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-red-500"
-                  style={{ 
-                    backgroundColor: isDarkMode ? '#1a1a1a' : '#ffffff',
-                    borderColor: isDarkMode ? '#333333' : '#e5e5e5',
-                    color: isDarkMode ? '#ffffff' : '#1a1a1a'
-                  }}
+                    style={{ 
+                      backgroundColor: isDarkMode ? '#1a1a1a' : '#ffffff',
+                      borderColor: isDarkMode ? '#333333' : '#e5e5e5',
+                      color: isDarkMode ? '#ffffff' : '#1a1a1a'
+                    }}
                 >
                   <option value="">Select solution</option>
                   {SOLUTION_OPTIONS.map(opt => (
@@ -1208,7 +1787,7 @@ export default function Dashboard() {
                           type="checkbox" 
                           className="sr-only peer" 
                           checked={notificationsEnabled}
-                          onChange={() => setNotificationsEnabled(!notificationsEnabled)}
+                          onChange={handleNotificationsToggle}
                         />
                         <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-blue-600"></div>
                       </label>
@@ -1241,7 +1820,7 @@ export default function Dashboard() {
                         <option value={1000}>1 kilometer</option>
                       </select>
                     </div>
-                    {/* Sound Alerts */}
+                                        {/* Sound Alerts */}
                     <div className="flex items-center justify-between p-3 rounded-lg transition-all duration-200 hover:bg-gray-50 dark:hover:bg-gray-800" style={{ 
                       backgroundColor: isDarkMode ? '#1a1a1a' : '#ffffff',
                       border: `1px solid ${isDarkMode ? '#333333' : '#e5e5e5'}`
@@ -1254,13 +1833,13 @@ export default function Dashboard() {
                           type="checkbox" 
                           className="sr-only peer" 
                           checked={soundAlerts}
-                          onChange={() => setSoundAlerts(!soundAlerts)}
+                          onChange={handleSoundAlertsToggle}
                           disabled={!notificationsEnabled}
                         />
                         <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-blue-600" style={{ opacity: notificationsEnabled ? 1 : 0.5 }}></div>
                       </label>
                     </div>
-                    {/* Vibration Alerts */}
+                                        {/* Vibration Alerts */}
                     <div className="flex items-center justify-between p-3 rounded-lg transition-all duration-200 hover:bg-gray-50 dark:hover:bg-gray-800" style={{ 
                       backgroundColor: isDarkMode ? '#1a1a1a' : '#ffffff',
                       border: `1px solid ${isDarkMode ? '#333333' : '#e5e5e5'}`
@@ -1273,13 +1852,13 @@ export default function Dashboard() {
                           type="checkbox" 
                           className="sr-only peer" 
                           checked={vibrationAlerts}
-                          onChange={() => setVibrationAlerts(!vibrationAlerts)}
-                          disabled={!notificationsEnabled}
+                          onChange={handleVibrationAlertsToggle}
+                          disabled={!notificationsEnabled || !vibrationSupported}
                         />
-                        <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-blue-600" style={{ opacity: notificationsEnabled ? 1 : 0.5 }}></div>
+                        <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-blue-600" style={{ opacity: (notificationsEnabled && vibrationSupported) ? 1 : 0.5 }}></div>
                       </label>
-                    </div>
-                </div>
+              </div>
+            </div>
               </div>
 
               {/* User Settings Section */}
@@ -1370,7 +1949,7 @@ export default function Dashboard() {
                   <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" className="inline-block">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                   </svg>
-                  Cancel
+                Cancel
                 </button>
                 <button
                   onClick={() => setShowSettings(false)}
@@ -1382,8 +1961,118 @@ export default function Dashboard() {
                   <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" className="inline-block">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                   </svg>
-                  Save Settings
+                Save Settings
                 </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Directions Form - Inline below search bar */}
+      {showDirections && (
+        <div className="absolute top-20 sm:top-24 md:top-28 left-1/2 -translate-x-1/2 w-full max-w-[95%] sm:max-w-2xl lg:max-w-4xl z-10">
+          <div className="rounded-lg sm:rounded-xl shadow-lg backdrop-blur-sm p-4" style={{ 
+            backgroundColor: `${isDarkMode ? '#1a1a1a' : '#ffffff'}e6`, 
+            border: `1px solid ${isDarkMode ? '#333333' : '#e5e5e5'}` 
+          }}>
+            <div className="space-y-3">
+              {/* Origin Input */}
+              <div className="flex gap-2">
+                <div className="flex-1 relative">
+                  <input
+                    type="text"
+                    value={origin}
+                    onChange={(e) => setOrigin(e.target.value)}
+                    placeholder="From: Enter starting location..."
+                    className="w-full p-3 pr-10 rounded-lg border transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                    style={{ 
+                      backgroundColor: isDarkMode ? '#1a1a1a' : '#ffffff',
+                      borderColor: isDarkMode ? '#333333' : '#e5e5e5',
+                      color: isDarkMode ? '#ffffff' : '#1a1a1a'
+                    }}
+                  />
+                  <div className="absolute right-3 top-1/2 transform -translate-y-1/2 pointer-events-none">
+                    <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" style={{ color: isDarkMode ? '#666666' : '#999999' }}>
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                    </svg>
+                  </div>
+                </div>
+                <button
+                  onClick={useCurrentLocation}
+                  className="px-3 py-3 rounded-lg border transition-all duration-200 hover:bg-blue-50 dark:hover:bg-blue-900/20"
+                  style={{ 
+                    backgroundColor: isDarkMode ? '#1a1a1a' : '#ffffff',
+                    borderColor: isDarkMode ? '#333333' : '#e5e5e5',
+                    color: '#3B82F6'
+                  }}
+                  title="Use Current Location"
+                >
+                  <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                  </svg>
+                </button>
+              </div>
+
+              {/* Destination Input */}
+              <div className="relative">
+                <input
+                  type="text"
+                  value={destination}
+                  onChange={(e) => setDestination(e.target.value)}
+                  placeholder="To: Enter destination..."
+                  className="w-full p-3 pr-10 rounded-lg border transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                  style={{ 
+                    backgroundColor: isDarkMode ? '#1a1a1a' : '#ffffff',
+                    borderColor: isDarkMode ? '#333333' : '#e5e5e5',
+                    color: isDarkMode ? '#ffffff' : '#1a1a1a'
+                  }}
+                />
+                <div className="absolute right-3 top-1/2 transform -translate-y-1/2 pointer-events-none">
+                  <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" style={{ color: isDarkMode ? '#666666' : '#999999' }}>
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                  </svg>
+                </div>
+              </div>
+
+              {/* Action Buttons */}
+              <div className="flex gap-2">
+                <button 
+                  onClick={calculateDirections}
+                  disabled={!origin || !destination || isCalculatingRoute}
+                  className={`flex-1 p-3 rounded-lg font-medium flex items-center justify-center gap-2 transition-all duration-200 text-white shadow-md focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-400 text-sm ${
+                    !origin || !destination || isCalculatingRoute 
+                      ? 'bg-gray-400 cursor-not-allowed' 
+                      : 'bg-gradient-to-r from-[#3B82F6] to-[#1D4ED8] hover:from-[#1D4ED8] hover:to-[#1E40AF]'
+                  }`}
+                >
+                  {isCalculatingRoute ? (
+                    <>
+                      <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                      Calculating...
+                    </>
+                  ) : (
+                    <>
+                      <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-1.447-.894L15 4m0 13V4m-6 3l6-3" />
+                      </svg>
+                      Get Route
+                    </>
+                  )}
+                </button>
+                
+                {directionsData && (
+                  <button 
+                    onClick={clearRoute}
+                    className="px-4 py-3 rounded-lg font-medium text-white bg-gradient-to-r from-[#EF4444] to-[#DC2626] hover:from-[#DC2626] hover:to-[#B91C1C] transition-all duration-200 text-sm"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -1798,7 +2487,7 @@ export default function Dashboard() {
 
             {/* Reports List Section */}
             {(() => {
-              const reports = violationReports.filter(r =>
+              const reports = violationZones.filter((r: ViolationZone) =>
                 r.lat === selectedViolation.lat && r.lng === selectedViolation.lng
               );
               if (reports.length > 0) {
@@ -1844,7 +2533,7 @@ export default function Dashboard() {
                       paddingRight: '8px',
                     }}>
                       {reports.map((r, i) => (
-                        <div key={r.timestamp + '-' + i} style={{
+                        <div key={r.id + '-' + i} style={{
                           background: isDarkMode ? '#0f0f0f' : '#f8f9fa',
                           border: `1px solid ${isDarkMode ? '#333333' : '#e5e5e5'}`,
                           borderRadius: '8px',
@@ -1886,7 +2575,7 @@ export default function Dashboard() {
                               color: '#ff4444',
                               fontSize: '0.8rem',
                             }}>
-                              {r.type}
+                              {r.violation_type}
                             </span>
                           </div>
 
@@ -1914,12 +2603,12 @@ export default function Dashboard() {
           </div>
             {/* Violation Statistics Graph */}
           {(() => {
-            const reports = violationReports.filter(r =>
+            const reports = violationZones.filter((r: ViolationZone) =>
               r.lat === selectedViolation.lat && r.lng === selectedViolation.lng
             );
             const typeCounts: Record<string, number> = {};
-            reports.forEach(r => {
-              typeCounts[r.type] = (typeCounts[r.type] || 0) + 1;
+            reports.forEach((r: ViolationZone) => {
+              typeCounts[r.violation_type] = (typeCounts[r.violation_type] || 0) + 1;
             });
             const maxCount = Math.max(1, ...Object.values(typeCounts));
             return (
@@ -2180,7 +2869,7 @@ export default function Dashboard() {
                     color: '#ff4444',
                     marginBottom: '6px',
                   }}>
-                    {violationReports.length}
+                    {violationZones.length}
                   </div>
                   <div style={{
                     fontSize: '0.8rem',
@@ -2230,8 +2919,8 @@ export default function Dashboard() {
 
                 {(() => {
                   const typeCounts: Record<string, number> = {};
-                  violationReports.forEach(r => {
-                    typeCounts[r.type] = (typeCounts[r.type] || 0) + 1;
+                  violationZones.forEach((r: ViolationZone) => {
+                    typeCounts[r.violation_type] = (typeCounts[r.violation_type] || 0) + 1;
                   });
                   const sortedTypes = Object.entries(typeCounts).sort((a, b) => b[1] - a[1]);
                   const maxCount = Math.max(1, ...Object.values(typeCounts));
@@ -2346,7 +3035,7 @@ export default function Dashboard() {
                   maxHeight: '120px',
                   overflowY: 'auto',
                 }}>
-                  {violationReports.slice(0, 5).map((report, index) => (
+                  {violationZones.slice(0, 5).map((report: ViolationZone, index: number) => (
                     <div key={index} style={{
                       display: 'flex',
                       alignItems: 'center',
@@ -2378,13 +3067,13 @@ export default function Dashboard() {
                           color: isDarkMode ? '#ffffff' : '#1a1a1a',
                           marginBottom: '2px',
                         }}>
-                          {report.type}
+                          {report.violation_type}
                         </div>
                         <div style={{
                           fontSize: '0.7rem',
                           color: isDarkMode ? '#888' : '#666',
                         }}>
-                          {new Date(report.timestamp).toLocaleDateString()} • {new Date(report.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                          {new Date(report.created_at).toLocaleDateString()} • {new Date(report.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
                         </div>
                       </div>
                     </div>
@@ -2431,7 +3120,7 @@ export default function Dashboard() {
 
                 {(() => {
                   const locationCounts: Record<string, number> = {};
-                  violationReports.forEach(r => {
+                  violationZones.forEach((r: ViolationZone) => {
                     const key = `${r.lat.toFixed(4)},${r.lng.toFixed(4)}`;
                     locationCounts[key] = (locationCounts[key] || 0) + 1;
                   });
