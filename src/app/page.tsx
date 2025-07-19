@@ -6,7 +6,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { violationsApi, statsApi } from "../lib/api";
+import { violationsApi } from "../lib/api";
 import { Location } from "../lib/supabase";
 
 
