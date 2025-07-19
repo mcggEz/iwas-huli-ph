@@ -6,19 +6,61 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { fetchViolationZones, createViolationZone, subscribeToViolationZones } from "../lib/violation-zones";
-import { ViolationZone } from "../lib/supabase";
+import { violationsApi, statsApi } from "../lib/api";
+import { Location } from "../lib/supabase";
 
+
+// Global variable to track if script is already loading
+let googleMapsScriptLoading = false;
+let googleMapsScriptLoaded = false;
 
 function loadGoogleMapsScript(apiKey: string): Promise<void> | undefined {
   if (typeof window === "undefined") return;
-  if ((window as any).google && (window as any).google.maps) return Promise.resolve();
+  
+  // Check if already loaded
+  if (googleMapsScriptLoaded || ((window as any).google && (window as any).google.maps)) {
+    googleMapsScriptLoaded = true;
+    return Promise.resolve();
+  }
+  
+  // Check if already loading
+  if (googleMapsScriptLoading) {
+    return new Promise((resolve) => {
+      const checkLoaded = () => {
+        if (googleMapsScriptLoaded || ((window as any).google && (window as any).google.maps)) {
+          googleMapsScriptLoaded = true;
+          resolve();
+        } else {
+          setTimeout(checkLoaded, 100);
+        }
+      };
+      checkLoaded();
+    });
+  }
+  
+  // Check if script tag already exists
+  const existingScript = document.querySelector('script[src*="maps.googleapis.com/maps/api/js"]');
+  if (existingScript) {
+    googleMapsScriptLoading = false;
+    googleMapsScriptLoaded = true;
+    return Promise.resolve();
+  }
+  
+  googleMapsScriptLoading = true;
+  
   return new Promise((resolve, reject) => {
     const script = document.createElement("script");
     script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places`;
     script.async = true;
-    script.onload = () => resolve();
-    script.onerror = reject;
+    script.onload = () => {
+      googleMapsScriptLoading = false;
+      googleMapsScriptLoaded = true;
+      resolve();
+    };
+    script.onerror = (error) => {
+      googleMapsScriptLoading = false;
+      reject(error);
+    };
     document.head.appendChild(script);
   });
 }
@@ -159,12 +201,12 @@ export default function Dashboard() {
   const [userLocationMarker, setUserLocationMarker] = useState<google.maps.Marker | null>(null);
   const notifiedZonesRef = useRef<{ [key: string]: number }>({});
 
-  // State for selected violation (for side panel)
-  const [selectedViolation, setSelectedViolation] = useState<any>(null);
+  // State for selected location (for side panel)
+  const [selectedLocationForSidebar, setSelectedLocationForSidebar] = useState<any>(null);
   // State for selected address
   const [selectedAddress, setSelectedAddress] = useState('');
-  // Store all violation zones from database
-  const [violationZones, setViolationZones] = useState<ViolationZone[]>([]);
+  // Store all locations from database
+  const [locations, setLocations] = useState<Location[]>([]);
   // State for showing the graph
   const [showGraph, setShowGraph] = useState(false);
   // State for showing the mobile app panel
@@ -177,6 +219,9 @@ export default function Dashboard() {
   const [origin, setOrigin] = useState('');
   const [destination, setDestination] = useState('');
   const [isCalculatingRoute, setIsCalculatingRoute] = useState(false);
+  const [routeViolationZones, setRouteViolationZones] = useState<any[]>([]);
+  const [selectedViolationMarker, setSelectedViolationMarker] = useState<google.maps.Marker | null>(null);
+  const [selectedViolation, setSelectedViolation] = useState<any>(null);
 
   // Settings state
   const [proximityAlerts, setProximityAlerts] = useState(true);
@@ -196,11 +241,43 @@ export default function Dashboard() {
     solutions: ""
   });
 
+  // Validation errors state
+  const [validationErrors, setValidationErrors] = useState({
+    violationType: "",
+    reasons: "",
+    solutions: "",
+    rateLimit: ""
+  });
+
   const [showLandmarks, setShowLandmarks] = useState(true);
   const [reasonOther, setReasonOther] = useState('');
   const [solutionOther, setSolutionOther] = useState('');
   // In Dashboard component state:
   const [violationTypeOther, setViolationTypeOther] = useState('');
+
+  // Rate limiting and spam protection
+  const [lastSubmissionTime, setLastSubmissionTime] = useState(0);
+  const [submissionCount, setSubmissionCount] = useState(0);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [cooldownEndTime, setCooldownEndTime] = useState(0);
+  
+  // UI notification state
+  const [notification, setNotification] = useState<{
+    message: string;
+    type: 'error' | 'warning' | 'success';
+    visible: boolean;
+  }>({
+    message: '',
+    type: 'error',
+    visible: false
+  });
+
+  // Rate limiting constants
+  const RATE_LIMIT = {
+    MAX_SUBMISSIONS_PER_HOUR: 5,
+    MIN_INTERVAL_BETWEEN_SUBMISSIONS: 30000, // 30 seconds
+    COOLDOWN_DURATION: 3600000, // 1 hour in milliseconds
+  };
 
   // Function to generate map styles (normal roads)
   const generateMapStyles = () => {
@@ -239,60 +316,62 @@ export default function Dashboard() {
 
   // Load violation zones from database
   useEffect(() => {
-    const loadViolationZones = async () => {
-      const zones = await fetchViolationZones();
-      setViolationZones(zones);
-    };
-
-    loadViolationZones();
-  }, []);
-
-  // Subscribe to real-time updates
-  useEffect(() => {
-    const subscription = subscribeToViolationZones((payload) => {
-      if (payload.eventType === 'INSERT') {
-        setViolationZones(prev => [payload.new, ...prev]);
-      } else if (payload.eventType === 'DELETE') {
-        setViolationZones(prev => prev.filter(zone => zone.id !== payload.old.id));
+    const loadData = async () => {
+      try {
+        console.log('📖 Loading violation zones from database...');
+        const response = await violationsApi.getAll();
+        console.log(`✅ Loaded ${response.data.length} violation zones`);
+        setLocations(response.data);
+      } catch (error) {
+        console.error('❌ Error loading violation zones:', error);
       }
-    });
-
-    return () => {
-      subscription.unsubscribe();
     };
+
+    loadData();
   }, []);
 
-  // Initialize map
+  // Note: Real-time subscriptions removed - using API routes instead
+
+  // Load Google Maps script (only once)
   useEffect(() => {
     const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
     if (!apiKey) return; // Don't load if not set
-    let markers: any[] = [];
-    let infoWindow: any = null;
-    let mapInstance: any = null;
+    
     loadGoogleMapsScript(apiKey)?.then(() => {
-      if (mapRef.current && (window as any).google) {
+      console.log('✅ Google Maps script loaded successfully');
+    }).catch((error) => {
+      console.error('❌ Failed to load Google Maps script:', error);
+    });
+  }, []); // Empty dependency array - only run once
+
+  // Initialize map after script is loaded
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!(window as any).google || !mapRef.current) return;
+    
+    console.log('🗺️ Initializing map...');
+    
         // @ts-ignore
-        mapInstance = new (window as any).google.maps.Map(mapRef.current, {
+    const mapInstance = new (window as any).google.maps.Map(mapRef.current, {
           center: { lat: 14.5995, lng: 120.9842 },
           zoom: 12,
           disableDefaultUI: true,
           styles: generateMapStyles()
         });
+    
         setMap(mapInstance);
-
-        // User location will be added when driving mode is enabled
+    console.log('✅ Map initialized successfully');
 
         // Add violation zone markers
-        infoWindow = new (window as any).google.maps.InfoWindow();
-        
-      }
-    });
-    return () => {};
-  }, [isDarkMode, highlightRoads, showLandmarks]);
+    const infoWindow = new (window as any).google.maps.InfoWindow();
+    
+  }, [googleMapsScriptLoaded]); // Use the global tracking variable instead
 
-  // Render violation zones on map when data changes
+  // Render locations on map when data changes
   useEffect(() => {
+    if (typeof window === 'undefined') return;
     if (!map) return;
+    
     // Remove all existing markers and polygons
     if ((window as any).violationZoneMarkers) {
       (window as any).violationZoneMarkers.forEach((m: any) => m.setMap(null));
@@ -304,15 +383,14 @@ export default function Dashboard() {
     (window as any).violationZonePolygons = [];
 
     if (!highlightRoads) return;
-    if (violationZones.length === 0) return;
 
-    // Add violation zone markers and polygons
-    violationZones.forEach((zone: ViolationZone) => {
-      // Create marker
+    // Add location markers and polygons
+    locations.forEach((location: Location) => {
+      // Create marker for each location
       const marker = new (window as any).google.maps.Marker({
-        position: { lat: zone.lat, lng: zone.lng },
+        position: { lat: location.lat, lng: location.lng },
         map: map,
-        title: zone.violation_type,
+        title: location.address,
         icon: {
           url: 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(`
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -326,20 +404,19 @@ export default function Dashboard() {
       marker.setMap(map);
       (window as any).violationZoneMarkers.push(marker);
 
-      // Add click listener to show violation details
+      // Add click listener to show location details
       marker.addListener("click", () => {
-        setSelectedViolation({
-          type: zone.violation_type,
-          reasons: zone.reasons,
-          solutions: zone.solutions,
-          lat: zone.lat,
-          lng: zone.lng,
-        });
+        // Show the first violation from this location
+        if (location.violations.length > 0) {
+          const firstViolation = location.violations[0];
+          const firstReport = firstViolation.reports[0];
+                  setSelectedLocationForSidebar(location);
+        }
       });
 
-      // Create violation zone polygon (red circle)
+      // Create location polygon (red circle)
       const polygon = new (window as any).google.maps.Polygon({
-        paths: generateCirclePath(zone.lat, zone.lng, 50), // 50 meter radius
+        paths: generateCirclePath(location.lat, location.lng, 50), // 50 meter radius
         strokeColor: '#ff4444',
         strokeOpacity: 0.8,
         strokeWeight: 2,
@@ -360,15 +437,24 @@ export default function Dashboard() {
         (window as any).violationZonePolygons.forEach((p: any) => p.setMap(null));
       }
     };
-  }, [map, violationZones, highlightRoads]);
+  }, [map, locations, highlightRoads]);
 
   // Add Places Autocomplete to search input
   useEffect(() => {
-    if (!map || !(window as any).google) return;
+    if (typeof window === 'undefined') return;
+    if (!map || !(window as any).google) {
+      console.log('❌ Cannot setup search autocomplete:', { hasMap: !!map, hasGoogle: !!(window as any).google });
+      return;
+    }
     
     const input = document.querySelector('input[placeholder="Search location..."]') as HTMLInputElement;
-    if (!input) return;
+    if (!input) {
+      console.log('❌ Search input not found');
+      return;
+    }
 
+    console.log('🔍 Setting up search autocomplete for:', input.placeholder);
+    
     const autocomplete = new (window as any).google.maps.places.Autocomplete(input, {
       types: ['geocode'],
       componentRestrictions: { country: 'ph' }, // restrict to Philippines
@@ -376,10 +462,19 @@ export default function Dashboard() {
 
     autocomplete.addListener('place_changed', () => {
       const place = autocomplete.getPlace();
+      console.log('📍 Place selected:', place);
       if (place.geometry && place.geometry.location) {
         map.setCenter(place.geometry.location);
         map.setZoom(15);
         console.log('✅ Map centered on:', place.formatted_address);
+        
+        // Also set this as the origin for directions
+        if (place.formatted_address) {
+          setOrigin(place.formatted_address);
+          console.log('✅ Origin set to:', place.formatted_address);
+        }
+      } else {
+        console.log('❌ No geometry found for place:', place);
       }
     });
 
@@ -388,31 +483,22 @@ export default function Dashboard() {
     };
   }, [map]);
 
-  // Add Places Autocomplete to directions inputs
+  // Add Places Autocomplete to destination input
   useEffect(() => {
+    if (typeof window === 'undefined') return;
     if (!map || !(window as any).google || !showDirections) return;
+    
+    console.log('🔧 Setting up destination autocomplete...');
     
     // Wait a bit for the DOM to be ready
     setTimeout(() => {
-      const originInput = document.querySelector('input[placeholder="Enter starting location..."]') as HTMLInputElement;
-      const destinationInput = document.querySelector('input[placeholder="Enter destination..."]') as HTMLInputElement;
+      console.log('🔍 Looking for destination input...');
+      const destinationInput = document.querySelector('input[placeholder="To: Enter destination..."]') as HTMLInputElement;
       
-      if (originInput) {
-        const originAutocomplete = new (window as any).google.maps.places.Autocomplete(originInput, {
-          types: ['geocode'],
-          componentRestrictions: { country: 'ph' },
-        });
-
-        originAutocomplete.addListener('place_changed', () => {
-          const place = originAutocomplete.getPlace();
-          if (place.formatted_address) {
-            setOrigin(place.formatted_address);
-            console.log('✅ Origin set to:', place.formatted_address);
-          }
-        });
-      }
+      console.log('📍 Found destination input:', !!destinationInput);
       
       if (destinationInput) {
+        console.log('🔍 Setting up destination autocomplete for:', destinationInput.placeholder);
         const destinationAutocomplete = new (window as any).google.maps.places.Autocomplete(destinationInput, {
           types: ['geocode'],
           componentRestrictions: { country: 'ph' },
@@ -420,13 +506,18 @@ export default function Dashboard() {
 
         destinationAutocomplete.addListener('place_changed', () => {
           const place = destinationAutocomplete.getPlace();
+          console.log('📍 Destination place selected:', place);
           if (place.formatted_address) {
             setDestination(place.formatted_address);
             console.log('✅ Destination set to:', place.formatted_address);
+          } else {
+            console.log('❌ No formatted address for destination place');
           }
         });
+      } else {
+        console.log('❌ Destination input not found');
       }
-    }, 100);
+    }, 200); // Increased delay to ensure DOM is ready
 
     return () => {
       // Cleanup not needed for autocomplete
@@ -442,6 +533,7 @@ export default function Dashboard() {
 
   // Initialize Directions Renderer
   useEffect(() => {
+    if (typeof window === 'undefined') return;
     if (!map || !(window as any).google) {
       console.log('❌ Cannot initialize directions renderer:', { hasMap: !!map, hasGoogle: !!(window as any).google });
       return;
@@ -492,6 +584,16 @@ export default function Dashboard() {
         if ((window as any).directionMarkers) {
           (window as any).directionMarkers.forEach((marker: any) => marker.setMap(null));
           (window as any).directionMarkers = [];
+        }
+        
+        // Clear route violation markers and polygons
+        if ((window as any).routeViolationMarkers) {
+          (window as any).routeViolationMarkers.forEach((marker: any) => marker.setMap(null));
+          (window as any).routeViolationMarkers = [];
+        }
+        if ((window as any).routeViolationPolygons) {
+          (window as any).routeViolationPolygons.forEach((polygon: any) => polygon.setMap(null));
+          (window as any).routeViolationPolygons = [];
         }
       }
     };
@@ -637,7 +739,7 @@ export default function Dashboard() {
         drivingWatchId.current = null;
       }
     };
-  }, [isDrivingMode, map, proximityAlerts, alertDistance, violationZones]);
+  }, [isDrivingMode, map, proximityAlerts, alertDistance, locations]);
 
   // User location marker will be managed by driving mode
 
@@ -770,35 +872,151 @@ export default function Dashboard() {
     }
   };
 
-  // Function to check proximity to violation zones
+  // Function to check proximity to violation locations
   const checkProximityToViolations = (userLat: number, userLng: number) => {
     if (!proximityAlerts || !isDrivingMode) return;
 
-    violationZones.forEach((violation: ViolationZone) => {
-      const distance = calculateDistance(userLat, userLng, violation.lat, violation.lng);
+    // Check locations
+    locations.forEach((location: Location) => {
+      const distance = calculateDistance(userLat, userLng, location.lat, location.lng);
       
-      if (distance <= alertDistance) {
-        const title = 'Violation Zone Ahead!';
-        const body = `${violation.violation_type} violation zone detected within ${Math.round(distance)}m`;
+      if (distance <= alertDistance && location.violations.length > 0) {
+        const violationTypes = location.violations.map(v => v.violation_type).join(', ');
+        const title = 'Violation Location Ahead!';
+        const body = `${violationTypes} violations detected within ${Math.round(distance)}m`;
         triggerAlerts(title, body);
       }
     });
   };
 
   const handleSearch = () => {
-    if (searchQuery.trim() && map) {
+    if (typeof window === 'undefined') return;
+    
+    console.log('🔍 Search triggered:', searchQuery);
+    
+    if (!searchQuery.trim()) {
+      console.log('❌ Empty search query');
+      return;
+    }
+    
+    if (!map) {
+      console.log('❌ Map not available');
+      return;
+    }
+    
+    if (!(window as any).google) {
+      console.log('❌ Google Maps API not available');
+      return;
+    }
+    
+    console.log('🗺️ Using geocoder for search...');
       const geocoder = new (window as any).google.maps.Geocoder();
       geocoder.geocode({ address: searchQuery + ", Manila, Philippines" }, (results: any, status: any) => {
-        if (status === 'OK') {
+      console.log('📡 Geocoder response:', { status, resultsCount: results?.length });
+      if (status === 'OK' && results && results.length > 0) {
           map.setCenter(results[0].geometry.location);
           map.setZoom(15);
+        console.log('✅ Map centered on search result:', results[0].formatted_address);
+      } else {
+        console.log('❌ Geocoder failed:', status);
+        alert('Location not found. Please try a different search term.');
         }
       });
+  };
+
+  // Rate limiting function
+  const checkRateLimit = () => {
+    const now = Date.now();
+    
+    // Check if user is in cooldown period
+    if (cooldownEndTime > now) {
+      return {
+        allowed: false,
+        message: `Rate limit exceeded. Please wait before submitting again.`
+      };
     }
+    
+    // Check minimum interval between submissions
+    if (lastSubmissionTime > 0 && (now - lastSubmissionTime) < RATE_LIMIT.MIN_INTERVAL_BETWEEN_SUBMISSIONS) {
+      return {
+        allowed: false,
+        message: `Please wait for couple of min before submitting another report.`
+      };
+    }
+    
+    // Check hourly submission limit
+    if (submissionCount >= RATE_LIMIT.MAX_SUBMISSIONS_PER_HOUR) {
+      setCooldownEndTime(now + RATE_LIMIT.COOLDOWN_DURATION);
+      return {
+        allowed: false,
+        message: `Hourly limit reached. Please wait for couple of min before submitting again.`
+      };
+    }
+    
+    return { allowed: true, message: '' };
   };
 
   const handleFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    
+    // Prevent double submission
+    if (isSubmitting) {
+      return;
+    }
+    
+    // Check rate limiting
+    const rateLimitCheck = checkRateLimit();
+    if (!rateLimitCheck.allowed) {
+      setValidationErrors({
+        violationType: "",
+        reasons: "",
+        solutions: "",
+        rateLimit: rateLimitCheck.message || 'Rate limit exceeded'
+      });
+      return;
+    }
+    
+    setIsSubmitting(true);
+    
+    // Clear previous validation errors
+    setValidationErrors({
+      violationType: "",
+      reasons: "",
+      solutions: "",
+      rateLimit: ""
+    });
+    
+    // Validate required fields
+    let hasErrors = false;
+    const errors = {
+      violationType: "",
+      reasons: "",
+      solutions: ""
+    };
+    
+    if (!formData.violationType || !formData.violationType.trim()) {
+      errors.violationType = "Please select a violation type";
+      hasErrors = true;
+    }
+    
+    if (!formData.reasons || !formData.reasons.trim()) {
+      errors.reasons = "Please provide a reason for the violation";
+      hasErrors = true;
+    }
+    
+    if (!formData.solutions || !formData.solutions.trim()) {
+      errors.solutions = "Please provide a suggested solution";
+      hasErrors = true;
+    }
+    
+    if (hasErrors) {
+      setValidationErrors({
+        ...errors,
+        rateLimit: ""
+      });
+      setIsSubmitting(false);
+      return;
+    }
     
     // Create violation zone circle and marker only when form is submitted
     if (selectedLocation && map) {
@@ -833,28 +1051,62 @@ export default function Dashboard() {
       // Add click listener to show violation details in side panel
       newMarker.addListener("click", () => {
         const pos = newMarker.getPosition();
-        setSelectedViolation({
-          type: formData.violationType,
-          reasons: formData.reasons,
-          solutions: formData.solutions,
-          lat: pos.lat(),
-          lng: pos.lng(),
-        });
+              // Find the location that matches these coordinates
+      const matchingLocation = locations.find(loc => 
+        Math.abs(loc.lat - pos.lat()) < 0.001 && Math.abs(loc.lng - pos.lng()) < 0.001
+      );
+      if (matchingLocation) {
+        setSelectedLocationForSidebar(matchingLocation);
+      }
       });
 
-     // Save violation zone to database
-     const newViolationZone = await createViolationZone({
-       violation_type: formData.violationType,
-         reasons: formData.reasons,
-         solutions: formData.solutions,
-         lat: selectedLocation.lat,
-         lng: selectedLocation.lng,
-     });
+     // Get address for the location
+     let address = 'Unknown Address';
+     try {
+       if (typeof window !== 'undefined' && (window as any).google) {
+         const geocoder = new (window as any).google.maps.Geocoder();
+         const result = await geocoder.geocode({ 
+           location: { lat: selectedLocation.lat, lng: selectedLocation.lng } 
+         });
+         if (result.results && result.results[0]) {
+           address = result.results[0].formatted_address;
+         }
+       }
+     } catch (error) {
+       console.log('Could not get address, using coordinates');
+       address = `Near ${selectedLocation.lat.toFixed(4)}, ${selectedLocation.lng.toFixed(4)}`;
+     }
 
-     if (newViolationZone) {
-       console.log('✅ Violation zone saved to database');
+     // Save violation zone to database using API
+     const response = await violationsApi.create({
+       lat: selectedLocation.lat,
+       lng: selectedLocation.lng,
+       address,
+       violationType: formData.violationType,
+       reasons: formData.reasons,
+       solutions: formData.solutions
+     });
+     
+     const newLocation = response.data;
+
+     if (newLocation) {
+       console.log('✅ Violation report saved to database');
+       
+       // Add the new location to the local state so it appears in the sidebar
+       setLocations(prevLocations => [...prevLocations, newLocation]);
+       
+       // Update rate limiting counters
+       const now = Date.now();
+       setLastSubmissionTime(now);
+       setSubmissionCount(prev => prev + 1);
+       
+       // Reset hourly counter after 1 hour
+       setTimeout(() => {
+         setSubmissionCount(0);
+       }, RATE_LIMIT.COOLDOWN_DURATION);
+       
      } else {
-       console.error('❌ Failed to save violation zone to database');
+       console.error('❌ Failed to save violation report to database');
      }
 
     }
@@ -865,28 +1117,47 @@ export default function Dashboard() {
       reasons: "",
       solutions: ""
     });
+    setValidationErrors({
+      violationType: "",
+      reasons: "",
+      solutions: "",
+      rateLimit: ""
+    });
     setShowForm(false);
     setSelectedLocation(null);
+    setIsSubmitting(false);
+  };
+
+  // Input sanitization function
+  const sanitizeInput = (input: string): string => {
+    // Remove potentially dangerous characters and limit length
+    return input
+      .replace(/[<>]/g, '') // Remove < and > to prevent XSS
+      .replace(/javascript:/gi, '') // Remove javascript: protocol
+      .replace(/on\w+=/gi, '') // Remove event handlers
+      .substring(0, 500); // Limit to 500 characters
   };
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
+    const sanitizedValue = sanitizeInput(e.target.value);
+    
     setFormData({
       ...formData,
-      [e.target.name]: e.target.value
+      [e.target.name]: sanitizedValue
     });
   };
 
 
 
-  // Fetch address when a violation is selected
+  // Fetch address when a location is selected
   useEffect(() => {
-    if (selectedViolation && selectedViolation.lat && selectedViolation.lng) {
+    if (selectedLocationForSidebar && selectedLocationForSidebar.lat && selectedLocationForSidebar.lng) {
       const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
       if (!apiKey) {
         setSelectedAddress('API key not set');
         return;
       }
-      fetch(`https://maps.googleapis.com/maps/api/geocode/json?latlng=${selectedViolation.lat},${selectedViolation.lng}&key=${apiKey}`)
+      fetch(`https://maps.googleapis.com/maps/api/geocode/json?latlng=${selectedLocationForSidebar.lat},${selectedLocationForSidebar.lng}&key=${apiKey}`)
         .then(res => res.json())
         .then(data => {
           if (data.results && data.results[0]) {
@@ -899,28 +1170,27 @@ export default function Dashboard() {
     } else {
       setSelectedAddress('');
     }
-  }, [selectedViolation]);
+  }, [selectedLocationForSidebar]);
 
   // Handler for '+ I also have this violation' button
   const handleAddAnotherViolation = () => {
-    if (selectedViolation && selectedViolation.lat && selectedViolation.lng) {
-      setSelectedLocation({ lat: selectedViolation.lat, lng: selectedViolation.lng });
-      setShowForm(true);
-    }
-  };
-  // Handler for '+ I have another violation here' button
-  const handleAddDifferentViolation = () => {
-    if (selectedViolation && selectedViolation.lat && selectedViolation.lng) {
-      setSelectedLocation({ lat: selectedViolation.lat, lng: selectedViolation.lng });
-      setFormData({ violationType: '', reasons: '', solutions: '' });
+    if (selectedLocationForSidebar && selectedLocationForSidebar.lat && selectedLocationForSidebar.lng) {
+      setSelectedLocation({ lat: selectedLocationForSidebar.lat, lng: selectedLocationForSidebar.lng });
       setShowForm(true);
     }
   };
 
+ 
+
   // Calculate directions
   const calculateDirections = async () => {
-    if (!origin || !destination || !directionsRenderer || !(window as any).google) {
-      console.log('❌ Missing required data:', { origin, destination, hasRenderer: !!directionsRenderer, hasGoogle: !!(window as any).google });
+    if (typeof window === 'undefined') return;
+    
+    // Use search query as origin if no origin is set
+    const effectiveOrigin = origin || searchQuery;
+    
+    if (!effectiveOrigin || !destination || !directionsRenderer || !(window as any).google) {
+      console.log('❌ Missing required data:', { effectiveOrigin, destination, hasRenderer: !!directionsRenderer, hasGoogle: !!(window as any).google });
       return;
     }
 
@@ -931,7 +1201,7 @@ export default function Dashboard() {
       const directionsService = new (window as any).google.maps.DirectionsService();
       
       const request = {
-        origin: origin,
+        origin: effectiveOrigin,
         destination: destination,
         travelMode: (window as any).google.maps.TravelMode.DRIVING,
         unitSystem: (window as any).google.maps.UnitSystem.METRIC,
@@ -966,6 +1236,11 @@ export default function Dashboard() {
         const path = route.overview_path;
         
         console.log('🛣️ Route path points:', path.length);
+        
+        // Detect violation zones along the route
+        detectRouteViolationZones(path).catch(error => {
+          console.error('Error detecting route violation zones:', error);
+        });
         
         // Clear previous direction markers
         if ((window as any).directionMarkers) {
@@ -1008,24 +1283,316 @@ export default function Dashboard() {
 
 
   // Use current location as origin
-  const useCurrentLocation = () => {
-    if (userLocation) {
-      setOrigin(`${userLocation.lat}, ${userLocation.lng}`);
-    } else {
+  const useCurrentLocation = async () => {
+    if (typeof window === 'undefined') return;
+    
+    if (!userLocation) {
       alert('Please enable location access first');
+      return;
+    }
+
+    if (!(window as any).google) {
+      console.log('❌ Google Maps API not available for geocoding');
+      // Fallback to coordinates if Google API is not available
+      setOrigin(`${userLocation.lat}, ${userLocation.lng}`);
+      return;
+    }
+
+    try {
+      console.log('🗺️ Converting coordinates to address...');
+      const geocoder = new (window as any).google.maps.Geocoder();
+      
+      const result = await new Promise((resolve, reject) => {
+        geocoder.geocode(
+          { location: { lat: userLocation.lat, lng: userLocation.lng } },
+          (results: any, status: any) => {
+            if (status === 'OK' && results && results.length > 0) {
+              resolve(results[0].formatted_address);
+            } else {
+              reject(new Error(`Geocoding failed: ${status}`));
+            }
+          }
+        );
+      });
+
+      console.log('✅ Address found:', result);
+      setOrigin(result as string);
+      
+      // Also set the search query if in directions mode
+      if (showDirections) {
+        setSearchQuery(result as string);
+        console.log('✅ Search query updated with current location');
+      }
+    } catch (error) {
+      console.error('❌ Error getting address:', error);
+      // Fallback to coordinates if geocoding fails
+      const fallbackAddress = `${userLocation.lat}, ${userLocation.lng}`;
+      setOrigin(fallbackAddress);
+      
+      // Also set the search query if in directions mode
+      if (showDirections) {
+        setSearchQuery(fallbackAddress);
+        console.log('✅ Search query updated with coordinates');
+      }
+    }
+  };
+
+  // Check if a line segment intersects with a circle
+  const lineIntersectsCircle = (
+    x1: number, y1: number, // Start point
+    x2: number, y2: number, // End point
+    cx: number, cy: number, // Circle center
+    r: number // Circle radius
+  ): boolean => {
+    // Convert lat/lng to approximate x,y coordinates for calculation
+    const latToY = (lat: number) => lat * 111000; // 1 degree lat ≈ 111km
+    const lngToX = (lng: number) => lng * 111000 * Math.cos(cx * Math.PI / 180); // Adjust for longitude
+    
+    const x1_conv = lngToX(x1);
+    const y1_conv = latToY(y1);
+    const x2_conv = lngToX(x2);
+    const y2_conv = latToY(y2);
+    const cx_conv = lngToX(cx);
+    const cy_conv = latToY(cy);
+    const r_conv = r; // Keep radius in meters
+
+    // Vector from line start to end
+    const dx = x2_conv - x1_conv;
+    const dy = y2_conv - y1_conv;
+    
+    // Vector from line start to circle center
+    const fx = cx_conv - x1_conv;
+    const fy = cy_conv - y1_conv;
+    
+    // Length of line segment squared
+    const lengthSq = dx * dx + dy * dy;
+    
+    // Projection of circle center onto line
+    const t = Math.max(0, Math.min(1, (fx * dx + fy * dy) / lengthSq));
+    
+    // Closest point on line to circle center
+    const closestX = x1_conv + t * dx;
+    const closestY = y1_conv + t * dy;
+    
+    // Distance from circle center to closest point
+    const distanceSq = (cx_conv - closestX) * (cx_conv - closestX) + (cy_conv - closestY) * (cy_conv - closestY);
+    
+    return distanceSq <= r_conv * r_conv;
+  };
+
+  const getAddressFromCoordinates = async (lat: number, lng: number): Promise<string> => {
+    try {
+      if (typeof window === 'undefined' || !(window as any).google) {
+        return `Near ${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+      }
+      
+      const geocoder = new (window as any).google.maps.Geocoder();
+      const result = await geocoder.geocode({ location: { lat, lng } });
+      
+      if (result.results && result.results[0]) {
+        return result.results[0].formatted_address;
+      }
+      
+      return `Near ${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+    } catch (error) {
+      console.error('Error geocoding coordinates:', error);
+      return `Near ${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+    }
+  };
+
+  const showSelectedViolationOnMap = (violation: any) => {
+    if (typeof window === 'undefined' || !map) return;
+    
+    // Clear previous selected violation marker
+    if (selectedViolationMarker) {
+      selectedViolationMarker.setMap(null);
+    }
+    
+    // Create new marker for selected violation
+    const marker = new (window as any).google.maps.Marker({
+      position: { lat: violation.lat, lng: violation.lng },
+      map: map,
+      title: violation.type,
+      icon: {
+        url: 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(`
+          <svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="16" cy="16" r="12" fill="#ff0000" stroke="#ffffff" stroke-width="3"/>
+            <circle cx="16" cy="16" r="6" fill="#ffffff"/>
+            <path d="M16 8v8m0 4v2" stroke="#ff0000" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        `),
+        scaledSize: new (window as any).google.maps.Size(32, 32)
+      },
+      animation: (window as any).google.maps.Animation.BOUNCE
+    });
+    
+    setSelectedViolationMarker(marker);
+    
+    // Pan map to selected violation
+    map.panTo({ lat: violation.lat, lng: violation.lng });
+    map.setZoom(16);
+    
+    console.log('📍 Selected violation shown on map:', violation);
+  };
+
+  // Detect violation locations along the route
+  const detectRouteViolationZones = async (routePath: any[]) => {
+    console.log('🔍 detectRouteViolationZones called with:', { 
+      locationsCount: locations.length,
+      routePathLength: routePath.length 
+    });
+    
+    if (!locations.length || !routePath.length) {
+      console.log('❌ Early return - no locations or route path');
+      setRouteViolationZones([]);
+      return;
+    }
+
+    const intersectingZones: any[] = [];
+    const zoneRadius = 50; // 50 meters radius for violation zones (matches the circle on map)
+
+    // Clear previous route violation markers
+    if ((window as any).routeViolationMarkers) {
+      (window as any).routeViolationMarkers.forEach((marker: any) => marker.setMap(null));
+    }
+    if ((window as any).routeViolationPolygons) {
+      (window as any).routeViolationPolygons.forEach((polygon: any) => polygon.setMap(null));
+    }
+    (window as any).routeViolationMarkers = [];
+    (window as any).routeViolationPolygons = [];
+
+    // Check each line segment of the route
+    for (let i = 0; i < routePath.length - 1; i++) {
+      const startPoint = routePath[i];
+      const endPoint = routePath[i + 1];
+      
+      // Check locations
+      for (const location of locations) {
+        // Check if this location is already in the list
+        const exists = intersectingZones.find(z => z.id === location.id);
+        if (exists) continue;
+
+        // Check if line segment intersects with location circle
+        const intersects = lineIntersectsCircle(
+          startPoint.lng(),
+          startPoint.lat(),
+          endPoint.lng(),
+          endPoint.lat(),
+          location.lng,
+          location.lat,
+          zoneRadius
+        );
+
+        if (intersects && location.violations.length > 0) {
+          // Convert location to violation zone format for compatibility
+          const firstViolation = location.violations[0];
+          const firstReport = firstViolation.reports[0];
+          const violationZone = {
+            id: location.id,
+            violation_type: firstViolation.violation_type,
+            reasons: firstReport.reason,
+            solutions: firstReport.suggested_solutions,
+            lat: location.lat,
+            lng: location.lng,
+            address: location.address,
+            created_at: location.created_at,
+            updated_at: location.updated_at
+          };
+          
+          intersectingZones.push(violationZone);
+          console.log(`🚨 Route intersects with location: ${firstViolation.violation_type} at ${location.address}`);
+
+          // Add special route violation marker
+          if (typeof window !== 'undefined' && (window as any).google && map) {
+            // Create warning marker for route violation
+            const routeViolationMarker = new (window as any).google.maps.Marker({
+              position: { lat: location.lat, lng: location.lng },
+              map: map,
+              icon: {
+                path: (window as any).google.maps.SymbolPath.CIRCLE,
+                scale: 12,
+                strokeColor: '#ffffff',
+                strokeWeight: 3,
+                fillColor: '#ff4444',
+                fillOpacity: 1
+              },
+              zIndex: 2000,
+              title: `⚠️ ${firstViolation.violation_type} - Route Violation Zone`
+            });
+
+            // Create highlighted polygon for route violation
+            const routeViolationPolygon = new (window as any).google.maps.Polygon({
+              paths: generateCirclePath(location.lat, location.lng, 50),
+              strokeColor: '#ff4444',
+              strokeOpacity: 1,
+              strokeWeight: 4,
+              fillColor: '#ff4444',
+              fillOpacity: 0.3,
+              map: map,
+              zIndex: 1500
+            });
+
+            (window as any).routeViolationMarkers.push(routeViolationMarker);
+            (window as any).routeViolationPolygons.push(routeViolationPolygon);
+
+            // Add click listener to show violation details
+            routeViolationMarker.addListener('click', () => {
+              const violationData = {
+                type: firstViolation.violation_type,
+                reasons: firstReport.reason,
+                solutions: firstReport.suggested_solutions,
+                lat: location.lat,
+                lng: location.lng,
+              };
+              showSelectedViolationOnMap(violationData);
+            });
+          }
+        }
+      }
+    }
+
+    console.log(' Found intersecting violation locations:', intersectingZones.length);
+    console.log(' Intersecting zones details:', intersectingZones);
+    setRouteViolationZones(intersectingZones);
+
+    // Show alert if violations found
+    if (intersectingZones.length > 0) {
+      triggerAlerts(
+        ' Route Violations Detected',
+        `Your route passes through ${intersectingZones.length} violation zone${intersectingZones.length > 1 ? 's' : ''}. Please review the details.`
+      );
     }
   };
 
   // Clear the current route
   const clearRoute = () => {
+    if (typeof window === 'undefined') return;
+    
     if (directionsRenderer) {
       directionsRenderer.setDirections({ routes: [] });
       setDirectionsData(null);
+      setRouteViolationZones([]); // Clear route violation zones
       
       // Clear direction markers
       if ((window as any).directionMarkers) {
         (window as any).directionMarkers.forEach((marker: any) => marker.setMap(null));
         (window as any).directionMarkers = [];
+      }
+      
+      // Clear route violation markers and polygons
+      if ((window as any).routeViolationMarkers) {
+        (window as any).routeViolationMarkers.forEach((marker: any) => marker.setMap(null));
+        (window as any).routeViolationMarkers = [];
+      }
+      if ((window as any).routeViolationPolygons) {
+        (window as any).routeViolationPolygons.forEach((polygon: any) => polygon.setMap(null));
+        (window as any).routeViolationPolygons = [];
+      }
+      
+      // Clear selected violation marker
+      if (selectedViolationMarker) {
+        selectedViolationMarker.setMap(null);
+        setSelectedViolationMarker(null);
       }
       
       console.log('🗑️ Route cleared');
@@ -1039,13 +1606,60 @@ export default function Dashboard() {
         backgroundColor: theme.bg,
       }}
     >
+      {/* Notification Toast */}
+      {notification.visible && (
+        <div 
+          className="fixed top-4 right-4 z-50 max-w-sm w-full p-4 rounded-lg shadow-lg backdrop-blur-sm border transition-all duration-300 transform"
+          style={{
+            backgroundColor: notification.type === 'error' ? '#fee2e2' : 
+                           notification.type === 'warning' ? '#fef3c7' : '#d1fae5',
+            borderColor: notification.type === 'error' ? '#fecaca' : 
+                        notification.type === 'warning' ? '#fde68a' : '#a7f3d0',
+            color: notification.type === 'error' ? '#991b1b' : 
+                   notification.type === 'warning' ? '#92400e' : '#065f46',
+            transform: notification.visible ? 'translateX(0)' : 'translateX(100%)'
+          }}
+        >
+          <div className="flex items-start gap-3">
+            <div className="flex-shrink-0">
+              {notification.type === 'error' && (
+                <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                </svg>
+              )}
+              {notification.type === 'warning' && (
+                <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                </svg>
+              )}
+              {notification.type === 'success' && (
+                <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              )}
+            </div>
+            <div className="flex-1">
+              <p className="text-sm font-medium">{notification.message}</p>
+            </div>
+            <button
+              onClick={() => setNotification(prev => ({ ...prev, visible: false }))}
+              className="flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center hover:bg-black/10 transition-colors"
+            >
+              <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Map background */}
       <div ref={mapRef} className="absolute inset-0 w-full h-full" />
       
       {/* Top Bar: Search + Directions + Hamburger in one row */}
       <div className="absolute top-2 sm:top-4 md:top-6 left-1/2 -translate-x-1/2 w-full max-w-[95%] sm:max-w-2xl lg:max-w-4xl z-10 flex flex-row items-center justify-center gap-x-1 sm:gap-x-2 px-2 sm:px-0">
         {/* Search Bar */}
-        <div className="flex items-center flex-1 rounded-lg sm:rounded-xl px-2 sm:px-4 py-2 sm:py-3 shadow-lg backdrop-blur-sm" style={{ 
+        <div className="flex items-center flex-1 rounded-lg sm:rounded-xl px-2 sm:px-4 py-2 sm:py-3 shadow-lg backdrop-blur-sm relative min-w-0" style={{ 
           backgroundColor: `${isDarkMode ? '#1a1a1a' : '#ffffff'}e6`, 
           border: `1px solid ${isDarkMode ? '#333333' : '#e5e5e5'}` 
         }}>
@@ -1057,16 +1671,57 @@ export default function Dashboard() {
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             onKeyPress={(e) => e.key === 'Enter' && handleSearch()}
-            placeholder="Search location..."
-            className="flex-1 bg-transparent outline-none text-sm sm:text-base font-medium min-w-0"
-            style={{ color: isDarkMode ? '#ffffff' : '#1a1a1a' }}
+            placeholder={showDirections ? "From: Search for starting location..." : "Search location..."}
+            className="flex-1 bg-transparent outline-none text-sm sm:text-base font-medium min-w-0 w-full"
+            style={{ 
+              color: isDarkMode ? '#ffffff' : '#1a1a1a'
+            }}
           />
+          {searchQuery && (
+            <button
+              onClick={() => setSearchQuery('')}
+              className="w-6 h-6 rounded-full flex items-center justify-center transition-all duration-200 hover:bg-gray-200 dark:hover:bg-gray-700 flex-shrink-0"
+              style={{ 
+                color: isDarkMode ? '#888888' : '#666666'
+              }}
+              title="Clear search"
+            >
+              <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          )}
+          {showDirections && (
+            <button
+              onClick={useCurrentLocation}
+              className="ml-2 sm:ml-3 px-2 sm:px-3 py-1.5 sm:py-2 text-xs sm:text-sm font-medium rounded-md transition-all duration-200 hover:scale-105 flex-shrink-0"
+              style={{ 
+                backgroundColor: '#ff4444', 
+                color: '#ffffff',
+                marginLeft: searchQuery ? '0.75rem' : '0.5rem'
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.backgroundColor = '#b71c1c';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.backgroundColor = '#ff4444';
+              }}
+              title="Use Current Location"
+            >
+              <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+              </svg>
+            </button>
+          )}
+          {!showDirections && (
           <button
             onClick={handleSearch}
-            className="ml-2 sm:ml-3 px-2 sm:px-3 py-1.5 sm:py-2 text-xs sm:text-sm font-medium rounded-md transition-all duration-200 hover:scale-105"
+            className="ml-2 sm:ml-3 px-2 sm:px-3 py-1.5 sm:py-2 text-xs sm:text-sm font-medium rounded-md transition-all duration-200 hover:scale-105 flex-shrink-0"
             style={{ 
               backgroundColor: '#ff4444', 
-              color: '#ffffff' 
+              color: '#ffffff',
+              marginLeft: searchQuery ? '0.75rem' : '0.5rem'
             }}
             onMouseEnter={(e) => {
               e.currentTarget.style.backgroundColor = '#b71c1c';
@@ -1076,7 +1731,8 @@ export default function Dashboard() {
             }}
           >
             Search
-          </button>
+            </button>
+          )}
           </div>
 
         {/* Directions Button */}
@@ -1139,69 +1795,174 @@ export default function Dashboard() {
           </button>
           </div>
 
-        {/* Hamburger Menu Button */}
-        <div className="flex-shrink-0">
+        {/* Enhanced Menu Button */}
+        <div className="flex-shrink-0 relative">
           <button
             onClick={() => setShowMenu(!showMenu)}
-            className="rounded-lg sm:rounded-xl w-10 sm:w-12 h-10 sm:h-12 flex items-center justify-center transition-all duration-200 hover:scale-105 shadow-lg backdrop-blur-sm"
+            className="rounded-lg sm:rounded-xl w-10 sm:w-12 h-10 sm:h-12 flex items-center justify-center transition-all duration-300 hover:scale-110 shadow-lg backdrop-blur-sm group"
             style={{ 
-              backgroundColor: `${isDarkMode ? '#1a1a1a' : '#ffffff'}e6`, 
-              border: `1px solid ${isDarkMode ? '#333333' : '#e5e5e5'}`,
-              color: isDarkMode ? '#cccccc' : '#666666'
+              backgroundColor: showMenu ? '#ff4444' : `${isDarkMode ? '#1a1a1a' : '#ffffff'}e6`, 
+              border: `2px solid ${showMenu ? '#ff4444' : isDarkMode ? '#333333' : '#e5e5e5'}`,
+              color: showMenu ? '#ffffff' : isDarkMode ? '#cccccc' : '#666666',
+              transform: showMenu ? 'scale(1.05)' : 'scale(1)',
+              boxShadow: showMenu ? '0 8px 25px rgba(255, 68, 68, 0.4)' : '0 4px 12px rgba(0, 0, 0, 0.15)'
             }}
             onMouseEnter={(e) => {
-              e.currentTarget.style.backgroundColor = isDarkMode ? '#333333' : '#f8f9fa';
-              e.currentTarget.style.color = isDarkMode ? '#ffffff' : '#1a1a1a';
+              if (!showMenu) {
+                e.currentTarget.style.backgroundColor = isDarkMode ? '#333333' : '#f8f9fa';
+                e.currentTarget.style.color = isDarkMode ? '#ffffff' : '#1a1a1a';
+                e.currentTarget.style.borderColor = '#ff4444';
+                e.currentTarget.style.boxShadow = '0 6px 20px rgba(255, 68, 68, 0.3)';
+              }
             }}
             onMouseLeave={(e) => {
-              e.currentTarget.style.backgroundColor = `${isDarkMode ? '#1a1a1a' : '#ffffff'}e6`;
-              e.currentTarget.style.color = isDarkMode ? '#cccccc' : '#666666';
+              if (!showMenu) {
+                e.currentTarget.style.backgroundColor = `${isDarkMode ? '#1a1a1a' : '#ffffff'}e6`;
+                e.currentTarget.style.color = isDarkMode ? '#cccccc' : '#666666';
+                e.currentTarget.style.borderColor = isDarkMode ? '#333333' : '#e5e5e5';
+                e.currentTarget.style.boxShadow = '0 4px 12px rgba(0, 0, 0, 0.15)';
+              }
             }}
+            title="Menu & Information"
+            aria-label="Open menu and information panel"
           >
-            <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <line x1="3" y1="6" x2="21" y2="6" strokeWidth="2"/>
-              <line x1="3" y1="12" x2="21" y2="12" strokeWidth="2"/>
-              <line x1="3" y1="18" x2="21" y2="18" strokeWidth="2"/>
-            </svg>
+            <div className="relative">
+              <svg 
+                width="20" 
+                height="20" 
+                fill="none" 
+                viewBox="0 0 24 24" 
+                stroke="currentColor"
+                className={`transition-transform duration-300 ${showMenu ? 'rotate-90' : 'rotate-0'}`}
+              >
+                <line x1="3" y1="6" x2="21" y2="6" strokeWidth="2"/>
+                <line x1="3" y1="12" x2="21" y2="12" strokeWidth="2"/>
+                <line x1="3" y1="18" x2="21" y2="18" strokeWidth="2"/>
+              </svg>
+              
+              {/* Notification indicator */}
+              <div 
+                className="absolute -top-1 -right-1 w-3 h-3 bg-red-500 rounded-full animate-pulse"
+                style={{ 
+                  opacity: notificationsEnabled ? 0.8 : 0,
+                  transform: notificationsEnabled ? 'scale(1)' : 'scale(0)',
+                  transition: 'all 0.3s ease'
+                }}
+              />
+            </div>
           </button>
 
-          {/* Dropdown Menu */}
+          {/* Enhanced Dropdown Menu */}
           {showMenu && (
-            <div className="absolute top-12 sm:top-14 right-0 rounded-lg sm:rounded-xl min-w-[180px] sm:min-w-[220px] shadow-xl backdrop-blur-sm z-20" style={{ 
-              backgroundColor: `${isDarkMode ? '#1a1a1a' : '#ffffff'}f0`, 
-              border: `1px solid ${isDarkMode ? '#333333' : '#e5e5e5'}`,
-              backdropFilter: 'blur(10px)'
-            }}>
+            <div 
+              className="absolute top-12 sm:top-14 right-0 rounded-xl min-w-[240px] sm:min-w-[280px] shadow-2xl backdrop-blur-sm z-20 overflow-hidden"
+              style={{ 
+                backgroundColor: `${isDarkMode ? '#1a1a1a' : '#ffffff'}f0`, 
+                border: `2px solid ${isDarkMode ? '#333333' : '#e5e5e5'}`,
+                backdropFilter: 'blur(20px)',
+                animation: 'slideDown 0.3s ease-out'
+              }}
+            >
+              {/* Header */}
+              <div className="px-4 py-3 border-b" style={{ borderColor: isDarkMode ? '#333333' : '#e5e5e5' }}>
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ backgroundColor: '#ff4444' }}>
+                    <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="#ffffff">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+                    </svg>
+                  </div>
+                  <div>
+                    <h3 className="font-semibold text-sm" style={{ color: isDarkMode ? '#ffffff' : '#1a1a1a' }}>
+                      Menu & Information
+                    </h3>
+                    <p className="text-xs" style={{ color: isDarkMode ? '#888888' : '#666666' }}>
+                      Settings, help & more
+                    </p>
+                  </div>
+                </div>
+              </div>
+
               <div className="py-2">
+                {/* Settings Option */}
                 <button
                   onClick={() => {
                     setShowMenu(false);
                     setShowSettings(true);
                   }}
-                  className="w-full px-4 py-3 text-left font-medium text-sm flex items-center transition-all duration-200 hover:bg-gray-100 dark:hover:bg-gray-800"
+                  className="w-full px-4 py-3 text-left font-medium text-sm flex items-center transition-all duration-200 hover:bg-gray-100 dark:hover:bg-gray-800 group"
                   style={{ color: isDarkMode ? '#ffffff' : '#1a1a1a' }}
                 >
-                  <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" className="mr-3">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                  <div className="mr-3 p-1.5 rounded-lg transition-all duration-200 group-hover:bg-blue-100 dark:group-hover:bg-blue-900/30" style={{ backgroundColor: isDarkMode ? '#333333' : '#f8f9fa' }}>
+                    <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    </svg>
+                  </div>
+                  <div className="flex-1">
+                    <div className="font-medium">Settings</div>
+                    <div className="text-xs" style={{ color: isDarkMode ? '#888888' : '#666666' }}>
+                      Configure notifications & preferences
+                    </div>
+                  </div>
+                  <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="currentColor" style={{ color: isDarkMode ? '#888888' : '#666666' }}>
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                   </svg>
-                  Settings
                 </button>
-                <div className="my-1" style={{ borderTop: `1px solid ${isDarkMode ? '#333333' : '#e5e5e5'}` }}></div>
+
+                {/* Divider */}
+                <div className="my-2 mx-4 h-px" style={{ backgroundColor: isDarkMode ? '#333333' : '#e5e5e5' }}></div>
+
+                {/* About Option */}
                 <button
                   onClick={() => {
                     setShowMenu(false);
                     window.location.href = '/about-us';
                   }}
-                  className="w-full px-4 py-3 text-left font-medium text-sm flex items-center transition-all duration-200 hover:bg-gray-100 dark:hover:bg-gray-800"
+                  className="w-full px-4 py-3 text-left font-medium text-sm flex items-center transition-all duration-200 hover:bg-gray-100 dark:hover:bg-gray-800 group"
                   style={{ color: '#ff4444' }}
                 >
-                  <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" className="mr-3">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  <div className="mr-3 p-1.5 rounded-lg transition-all duration-200 group-hover:bg-red-100 dark:group-hover:bg-red-900/30" style={{ backgroundColor: isDarkMode ? '#333333' : '#f8f9fa' }}>
+                    <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0 1 18 0z" />
+                    </svg>
+                  </div>
+                  <div className="flex-1">
+                    <div className="font-medium">About the App</div>
+                 
+                  </div>
+                  <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="currentColor" style={{ color: isDarkMode ? '#888888' : '#666666' }}>
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
                   </svg>
-                  About the app
                 </button>
-        </div>
+
+                {/* Divider */}
+                <div className="my-2 mx-4 h-px" style={{ backgroundColor: isDarkMode ? '#333333' : '#e5e5e5' }}></div>
+
+                {/* Quick Stats */}
+                <div className="px-4 py-3">
+                  <div className="text-xs font-medium mb-2" style={{ color: isDarkMode ? '#888888' : '#666666' }}>
+                    Quick Stats
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <div className="p-2 rounded-lg" style={{ backgroundColor: isDarkMode ? '#333333' : '#f8f9fa' }}>
+                      <div className="font-semibold" style={{ color: isDarkMode ? '#ffffff' : '#1a1a1a' }}>
+                        {locations.length}
+                      </div>
+                      <div style={{ color: isDarkMode ? '#888888' : '#666666' }}>
+                        Violation Zones
+                      </div>
+                    </div>
+                    <div className="p-2 rounded-lg" style={{ backgroundColor: isDarkMode ? '#333333' : '#f8f9fa' }}>
+                      <div className="font-semibold" style={{ color: isDarkMode ? '#ffffff' : '#1a1a1a' }}>
+                        {notificationsEnabled ? 'ON' : 'OFF'}
+                      </div>
+                      <div style={{ color: isDarkMode ? '#888888' : '#666666' }}>
+                        Alerts
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
           )}
         </div>
@@ -1600,9 +2361,17 @@ export default function Dashboard() {
                     style={{ backgroundColor: isDarkMode ? '#1a1a1a' : '#ffffff', borderColor: isDarkMode ? '#333333' : '#e5e5e5', color: isDarkMode ? '#ffffff' : '#1a1a1a' }}
                     placeholder="Enter other violation type"
                     value={violationTypeOther}
-                    onChange={e => setViolationTypeOther(e.target.value)}
+                    onChange={e => setViolationTypeOther(sanitizeInput(e.target.value))}
                     required
                   />
+                )}
+                {validationErrors.violationType && (
+                  <div className="mt-2 text-sm text-red-500 flex items-center gap-2">
+                    <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                    </svg>
+                    {validationErrors.violationType}
+                  </div>
                 )}
           </div>
 
@@ -1640,9 +2409,17 @@ export default function Dashboard() {
                     style={{ backgroundColor: isDarkMode ? '#1a1a1a' : '#ffffff', borderColor: isDarkMode ? '#333333' : '#e5e5e5', color: isDarkMode ? '#ffffff' : '#1a1a1a' }}
                     placeholder="Enter other reason"
                     value={reasonOther}
-                    onChange={e => setReasonOther(e.target.value)}
+                    onChange={e => setReasonOther(sanitizeInput(e.target.value))}
                     required
                   />
+                )}
+                {validationErrors.reasons && (
+                  <div className="mt-2 text-sm text-red-500 flex items-center gap-2">
+                    <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                    </svg>
+                    {validationErrors.reasons}
+                  </div>
                 )}
               </div>
 
@@ -1678,11 +2455,33 @@ export default function Dashboard() {
                     style={{ backgroundColor: isDarkMode ? '#1a1a1a' : '#ffffff', borderColor: isDarkMode ? '#333333' : '#e5e5e5', color: isDarkMode ? '#ffffff' : '#1a1a1a' }}
                     placeholder="Enter other solution"
                     value={solutionOther}
-                    onChange={e => setSolutionOther(e.target.value)}
+                    onChange={e => setSolutionOther(sanitizeInput(e.target.value))}
                     required
                   />
                 )}
+                {validationErrors.solutions && (
+                  <div className="mt-2 text-sm text-red-500 flex items-center gap-2">
+                    <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                    </svg>
+                    {validationErrors.solutions}
+                  </div>
+                )}
                 </div>
+                
+                {/* Rate Limit Error Message */}
+                {validationErrors.rateLimit && (
+                  <div className="mt-4 p-3 rounded-lg border flex items-center gap-2" style={{
+                    backgroundColor: '#fef3c7',
+                    borderColor: '#fde68a',
+                    color: '#92400e'
+                  }}>
+                    <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                    </svg>
+                    <span className="text-sm font-medium">{validationErrors.rateLimit}</span>
+                  </div>
+                )}
               </form>
               </div>
 
@@ -1701,6 +2500,12 @@ export default function Dashboard() {
                       reasons: "",
                       solutions: ""
                     });
+                    setValidationErrors({
+                      violationType: "",
+                      reasons: "",
+                      solutions: "",
+                      rateLimit: ""
+                    });
                   }}
                 className="px-6 py-2 rounded-lg font-medium transition-all duration-200 hover:bg-gray-100 dark:hover:bg-gray-800"
                 style={{ color: isDarkMode ? '#888888' : '#666666' }}
@@ -1710,16 +2515,34 @@ export default function Dashboard() {
               <button
                 type="submit"
                 onClick={handleFormSubmit}
-                className="px-6 py-2 rounded-lg font-medium transition-all duration-200 text-white"
-                style={{ backgroundColor: '#ff4444' }}
+                disabled={isSubmitting}
+                className="px-6 py-2 rounded-lg font-medium transition-all duration-200 text-white flex items-center gap-2"
+                style={{ 
+                  backgroundColor: isSubmitting ? '#666666' : '#ff4444',
+                  cursor: isSubmitting ? 'not-allowed' : 'pointer'
+                }}
                   onMouseEnter={(e) => {
-                  e.currentTarget.style.backgroundColor = '#b71c1c';
+                    if (!isSubmitting) {
+                      e.currentTarget.style.backgroundColor = '#b71c1c';
+                    }
                   }}
                   onMouseLeave={(e) => {
-                  e.currentTarget.style.backgroundColor = '#ff4444';
+                    if (!isSubmitting) {
+                      e.currentTarget.style.backgroundColor = '#ff4444';
+                    }
                   }}
                 >
-                Submit Report
+                {isSubmitting ? (
+                  <>
+                    <svg className="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    Submitting...
+                  </>
+                ) : (
+                  'Submit Report'
+                )}
                 </button>
               </div>
           </div>
@@ -1907,6 +2730,8 @@ export default function Dashboard() {
                 </div>
               </div>
 
+
+
                 {/* Mobile App Section */}
                 <div className="space-y-4">
                   <h3 className="text-lg font-semibold flex items-center gap-2" style={{ color: isDarkMode ? '#ffffff' : '#1a1a1a' }}>
@@ -1970,50 +2795,12 @@ export default function Dashboard() {
 
       {/* Directions Form - Inline below search bar */}
       {showDirections && (
-        <div className="absolute top-20 sm:top-24 md:top-28 left-1/2 -translate-x-1/2 w-full max-w-[95%] sm:max-w-2xl lg:max-w-4xl z-10">
+        <div className="absolute top-16 sm:top-20 md:top-24 left-1/2 -translate-x-1/2 w-full max-w-[95%] sm:max-w-2xl lg:max-w-4xl z-10">
           <div className="rounded-lg sm:rounded-xl shadow-lg backdrop-blur-sm p-4" style={{ 
             backgroundColor: `${isDarkMode ? '#1a1a1a' : '#ffffff'}e6`, 
             border: `1px solid ${isDarkMode ? '#333333' : '#e5e5e5'}` 
           }}>
             <div className="space-y-3">
-              {/* Origin Input */}
-              <div className="flex gap-2">
-                <div className="flex-1 relative">
-                  <input
-                    type="text"
-                    value={origin}
-                    onChange={(e) => setOrigin(e.target.value)}
-                    placeholder="From: Enter starting location..."
-                    className="w-full p-3 pr-10 rounded-lg border transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
-                    style={{ 
-                      backgroundColor: isDarkMode ? '#1a1a1a' : '#ffffff',
-                      borderColor: isDarkMode ? '#333333' : '#e5e5e5',
-                      color: isDarkMode ? '#ffffff' : '#1a1a1a'
-                    }}
-                  />
-                  <div className="absolute right-3 top-1/2 transform -translate-y-1/2 pointer-events-none">
-                    <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" style={{ color: isDarkMode ? '#666666' : '#999999' }}>
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                    </svg>
-                  </div>
-                </div>
-                <button
-                  onClick={useCurrentLocation}
-                  className="px-3 py-3 rounded-lg border transition-all duration-200 hover:bg-blue-50 dark:hover:bg-blue-900/20"
-                  style={{ 
-                    backgroundColor: isDarkMode ? '#1a1a1a' : '#ffffff',
-                    borderColor: isDarkMode ? '#333333' : '#e5e5e5',
-                    color: '#3B82F6'
-                  }}
-                  title="Use Current Location"
-                >
-                  <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
-                  </svg>
-                </button>
-              </div>
-
               {/* Destination Input */}
               <div className="relative">
                 <input
@@ -2021,7 +2808,7 @@ export default function Dashboard() {
                   value={destination}
                   onChange={(e) => setDestination(e.target.value)}
                   placeholder="To: Enter destination..."
-                  className="w-full p-3 pr-10 rounded-lg border transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                  className="w-full p-3 pr-16 rounded-lg border transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
                   style={{ 
                     backgroundColor: isDarkMode ? '#1a1a1a' : '#ffffff',
                     borderColor: isDarkMode ? '#333333' : '#e5e5e5',
@@ -2033,15 +2820,44 @@ export default function Dashboard() {
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
                   </svg>
                 </div>
+                {destination && (
+                  <button
+                    onClick={() => setDestination('')}
+                    className="absolute right-10 top-1/2 transform -translate-y-1/2 w-5 h-5 rounded-full flex items-center justify-center transition-all duration-200 hover:bg-gray-200 dark:hover:bg-gray-700"
+                    style={{ color: isDarkMode ? '#888888' : '#666666' }}
+                    title="Clear destination"
+                  >
+                    <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                )}
               </div>
+
+              {/* Route Summary */}
+              {directionsData && routeViolationZones.length > 0 && (
+                <div className="mt-3 p-3 rounded-lg border-2 border-red-200 bg-red-50 dark:bg-red-900/20 dark:border-red-800">
+                  <div className="flex items-center gap-2 mb-2">
+                    <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" className="text-red-600 dark:text-red-400">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                    </svg>
+                    <span className="text-sm font-semibold text-red-800 dark:text-red-200">
+                      ⚠️ Route passes through {routeViolationZones.length} violation zone{routeViolationZones.length > 1 ? 's' : ''}
+                    </span>
+                  </div>
+                  <p className="text-xs text-red-700 dark:text-red-300">
+                    Review the violation details below to understand traffic regulations and ensure safe driving practices.
+                  </p>
+                </div>
+              )}
 
               {/* Action Buttons */}
               <div className="flex gap-2">
                 <button 
                   onClick={calculateDirections}
-                  disabled={!origin || !destination || isCalculatingRoute}
+                  disabled={!destination || isCalculatingRoute}
                   className={`flex-1 p-3 rounded-lg font-medium flex items-center justify-center gap-2 transition-all duration-200 text-white shadow-md focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-400 text-sm ${
-                    !origin || !destination || isCalculatingRoute 
+                    !destination || isCalculatingRoute 
                       ? 'bg-gray-400 cursor-not-allowed' 
                       : 'bg-gradient-to-r from-[#3B82F6] to-[#1D4ED8] hover:from-[#1D4ED8] hover:to-[#1E40AF]'
                   }`}
@@ -2079,8 +2895,8 @@ export default function Dashboard() {
       )}
 
 
-      {/* Violation Details Side Panel */}
-      {selectedViolation && (
+      {/* Location Details Side Panel */}
+      {selectedLocationForSidebar && (
         <div
           style={{
             position: 'fixed',
@@ -2094,7 +2910,7 @@ export default function Dashboard() {
             zIndex: 100,
             padding: '0',
             overflowY: 'auto',
-            borderLeft: '4px solid #ff4444',
+
             fontFamily: "'Inter', 'Roboto', 'Arial', sans-serif",
             borderTopLeftRadius: 0,
             borderBottomLeftRadius: 0,
@@ -2161,33 +2977,32 @@ export default function Dashboard() {
                     margin: 0,
                     letterSpacing: '-0.025em',
                   }}>
-                    Violation Details
+                    Location Details
                   </h2>
-                  <p style={{
-                    fontSize: '0.875rem',
-                    color: isDarkMode ? '#888888' : '#666666',
-                    margin: 0,
-                    marginTop: '2px',
-                  }}>
-                    Report Information
-              </p>
-            </div>
-          </div>
-          <button
-            onClick={() => setSelectedViolation(null)}
-            style={{
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setSelectedLocationForSidebar(null);
+                  // Clear selected violation marker from map
+                  if (selectedViolationMarker) {
+                    selectedViolationMarker.setMap(null);
+                    setSelectedViolationMarker(null);
+                  }
+                }}
+                style={{
                   background: isDarkMode ? '#333333' : '#f1f1f1',
-              border: 'none',
+                  border: 'none',
                   borderRadius: '8px',
                   width: '36px',
                   height: '36px',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-              cursor: 'pointer',
+                  cursor: 'pointer',
                   transition: 'all 0.2s ease',
                   color: isDarkMode ? '#888888' : '#666666',
-            }}
+                }}
                 onMouseOver={e => {
                   e.currentTarget.style.background = isDarkMode ? '#444444' : '#e5e5e5';
                   e.currentTarget.style.color = '#ff4444';
@@ -2196,227 +3011,210 @@ export default function Dashboard() {
                   e.currentTarget.style.background = isDarkMode ? '#333333' : '#f1f1f1';
                   e.currentTarget.style.color = isDarkMode ? '#888888' : '#666666';
                 }}
-            aria-label="Close"
+                aria-label="Close"
               >
                 <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                 </svg>
               </button>
-        </div>
+            </div>
             
-            {/* Violation Type Badge */}
+            {/* Address Display */}
             <div style={{
-              display: 'inline-flex',
+              display: 'flex',
               alignItems: 'center',
               gap: '8px',
-              background: 'linear-gradient(135deg, #ff4444, #b71c1c)',
-              color: '#ffffff',
-              padding: '8px 16px',
-              borderRadius: '20px',
+              color: isDarkMode ? '#cccccc' : '#666666',
               fontSize: '0.875rem',
-              fontWeight: 600,
-              boxShadow: '0 2px 8px rgba(255, 68, 68, 0.3)',
+              fontWeight: 500,
+              lineHeight: '1.4',
             }}>
               <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
               </svg>
-              {selectedViolation.type}
+              {selectedLocationForSidebar.address}
             </div>
           </div>
 
           {/* Content */}
           <div style={{
-            padding: '24px',
+            padding: '24px 24px 60px 24px',
             flex: 1,
             display: 'flex',
             flexDirection: 'column',
             gap: '24px',
           }}>
 
-
-            {/* Reasons Section */}
+            {/* Violations Summary */}
             <div style={{
-              background: isDarkMode ? '#1a1a1a' : '#ffffff',
-              border: `1px solid ${isDarkMode ? '#333333' : '#e5e5e5'}`,
-              borderRadius: '12px',
-              padding: '20px',
-              boxShadow: isDarkMode ? '0 2px 8px rgba(0,0,0,0.2)' : '0 2px 8px rgba(0,0,0,0.05)',
-          }}>
-            <div style={{
-              display: 'flex',
-              alignItems: 'center',
-                gap: '8px',
-                marginBottom: '12px',
+              padding: '20px 0',
             }}>
-              <div style={{
-                background: '#ff4444',
-                  borderRadius: '6px',
-                  width: '24px',
-                  height: '24px',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-              }}>
-                  <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="#fff">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-              </div>
-                <h3 style={{
-                  fontSize: '1rem',
-                  fontWeight: 600,
-                  color: isDarkMode ? '#ffffff' : '#1a1a1a',
-                  margin: 0,
-              }}>
-                  Reasons
-                </h3>
-              </div>
-              <p style={{
-                fontSize: '0.95rem',
-                color: isDarkMode ? '#cccccc' : '#666666',
-                margin: 0,
-                lineHeight: '1.5',
-              }}>
-                {selectedViolation.reasons}
-              </p>
-            </div>
 
-            {/* Solutions Section */}
-            <div style={{
-              background: isDarkMode ? '#1a1a1a' : '#ffffff',
-              border: `1px solid ${isDarkMode ? '#333333' : '#e5e5e5'}`,
-              borderRadius: '12px',
-              padding: '20px',
-              boxShadow: isDarkMode ? '0 2px 8px rgba(0,0,0,0.2)' : '0 2px 8px rgba(0,0,0,0.05)',
-            }}>
-              <div style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '8px',
-                marginBottom: '12px',
-              }}>
-                <div style={{
-                  background: '#ff4444',
-                  borderRadius: '6px',
-                  width: '24px',
-                  height: '24px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}>
-                  <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="#fff">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-                  </svg>
-            </div>
-                <h3 style={{
-                  fontSize: '1rem',
-                  fontWeight: 600,
-                  color: isDarkMode ? '#ffffff' : '#1a1a1a',
-                  margin: 0,
-                }}>
-                  Suggested Solutions
-                </h3>
-            </div>
-              <p style={{
-                fontSize: '0.95rem',
-                color: isDarkMode ? '#cccccc' : '#666666',
-                margin: 0,
-                lineHeight: '1.5',
-              }}>
-                {selectedViolation.solutions}
-              </p>
-            </div>
-
-            {/* Status Badge */}
-            <div style={{
-              display: 'flex',
-              justifyContent: 'flex-end',
-            }}>
-              <div style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '6px',
-                background: isDarkMode ? '#1a1a1a' : '#f8f9fa',
-                color: '#ff4444',
-                padding: '6px 12px',
-                borderRadius: '16px',
-                fontSize: '0.75rem',
-              fontWeight: 600,
-                border: `1px solid ${isDarkMode ? '#333333' : '#e5e5e5'}`,
-                boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
-            }}>
-                <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-                </svg>
-              User Reported
-          </div>
-        </div>
-
-            {/* Location Section */}
-            {selectedViolation.lat && selectedViolation.lng && (
-              <div style={{
-                background: isDarkMode ? '#1a1a1a' : '#ffffff',
-                border: `1px solid ${isDarkMode ? '#333333' : '#e5e5e5'}`,
-                borderRadius: '12px',
-                padding: '20px',
-                boxShadow: isDarkMode ? '0 2px 8px rgba(0,0,0,0.2)' : '0 2px 8px rgba(0,0,0,0.05)',
-              }}>
-                  <div style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '8px',
-                  marginBottom: '12px',
-                }}>
-                  <div style={{
-                    background: '#ff4444',
-                    borderRadius: '6px',
-                    width: '24px',
-                    height: '24px',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
+              
+              {/* Violations List */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                {selectedLocationForSidebar.violations.map((violation: any, violationIndex: number) => (
+                  <div key={violation.id} style={{
+                    background: isDarkMode ? '#0f0f0f' : '#f8f9fa',
+                    borderRadius: '8px',
+                    padding: '16px',
+                    marginBottom: '12px',
                   }}>
-                    <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="#fff">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
-                    </svg>
-          </div>
-                  <h3 style={{
-                    fontSize: '1rem',
-                    fontWeight: 600,
-                    color: isDarkMode ? '#ffffff' : '#1a1a1a',
-                    margin: 0,
-                  }}>
-                    Location
-                  </h3>
-          </div>
-                <div style={{
-                  fontSize: '0.875rem',
-                  color: isDarkMode ? '#cccccc' : '#666666',
-                  marginBottom: '8px',
-                }}>
-                  <span style={{ fontWeight: 600, color: '#ff4444' }}>Coordinates:</span>
-                  <span style={{ marginLeft: '8px' }}>
-                    {selectedViolation.lat.toFixed(6)}, {selectedViolation.lng.toFixed(6)}
-                  </span>
-        </div>
-                {selectedAddress && (
-                  <div style={{
-                    fontSize: '0.875rem',
-                    color: isDarkMode ? '#cccccc' : '#666666',
-                    wordBreak: 'break-word',
-                  }}>
-                    <span style={{ fontWeight: 600, color: '#ff4444' }}>Address:</span>
-                    <span style={{ marginLeft: '8px' }}>{selectedAddress}</span>
+                    {/* Violation Type Header */}
+                    <div style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      marginBottom: '12px',
+                    }}>
+                      <div style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '8px',
+                      }}>
+                        <div style={{
+                          background: 'linear-gradient(135deg, #ff4444, #b71c1c)',
+                          borderRadius: '6px',
+                          width: '20px',
+                          height: '20px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                        }}>
+                          <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="#fff">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                          </svg>
+                        </div>
+                        <h4 style={{
+                          fontSize: '0.95rem',
+                          fontWeight: 600,
+                          color: isDarkMode ? '#ffffff' : '#1a1a1a',
+                          margin: 0,
+                        }}>
+                          {violation.violation_type}
+                        </h4>
+                      </div>
+                      <span style={{
+                        background: '#ff4444',
+                        color: '#ffffff',
+                        fontSize: '0.75rem',
+                        fontWeight: 600,
+                        padding: '4px 8px',
+                        borderRadius: '12px',
+                      }}>
+                        {violation.reports.length} report{violation.reports.length !== 1 ? 's' : ''}
+                      </span>
+                    </div>
+                    
+                    {/* Reports List */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                      {violation.reports.map((report: any, reportIndex: number) => (
+                        <div key={report.id} style={{
+                          background: isDarkMode ? '#1a1a1a' : '#ffffff',
+                          border: `1px solid ${isDarkMode ? '#333333' : '#e5e5e5'}`,
+                          borderRadius: '6px',
+                          padding: '12px',
+                        }}>
+                          {/* Report Header */}
+                          <div style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            marginBottom: '8px',
+                          }}>
+                            <span style={{
+                              fontSize: '0.8rem',
+                              color: isDarkMode ? '#888888' : '#666666',
+                              fontWeight: 500,
+                            }}>
+                              Report #{reportIndex + 1}
+                            </span>
+                            <span style={{
+                              fontSize: '0.75rem',
+                              color: isDarkMode ? '#888888' : '#666666',
+                            }}>
+                              {new Date(report.created_at).toLocaleDateString()}
+                            </span>
+                          </div>
+                          
+                          {/* Reason */}
+                          <div style={{ marginBottom: '8px' }}>
+                            <div style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '6px',
+                              marginBottom: '4px',
+                            }}>
+                              <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke={isDarkMode ? '#888888' : '#666666'}>
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0 1 18 0z" />
+                              </svg>
+                              <span style={{
+                                fontSize: '0.8rem',
+                                fontWeight: 600,
+                                color: isDarkMode ? '#cccccc' : '#444444',
+                              }}>
+                                Reason:
+                              </span>
+                            </div>
+                            <p style={{
+                              fontSize: '0.85rem',
+                              color: isDarkMode ? '#cccccc' : '#666666',
+                              margin: 0,
+                              lineHeight: '1.4',
+                            }}>
+                              {report.reason}
+                            </p>
+                          </div>
+                          
+                          {/* Suggested Solutions */}
+                          <div>
+                            <div style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '6px',
+                              marginBottom: '4px',
+                            }}>
+                              <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke={isDarkMode ? '#888888' : '#666666'}>
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                              </svg>
+                              <span style={{
+                                fontSize: '0.8rem',
+                                fontWeight: 600,
+                                color: isDarkMode ? '#cccccc' : '#444444',
+                              }}>
+                                Suggested Solution:
+                              </span>
+                            </div>
+                            <p style={{
+                              fontSize: '0.85rem',
+                              color: isDarkMode ? '#cccccc' : '#666666',
+                              margin: 0,
+                              lineHeight: '1.4',
+                            }}>
+                              {report.suggested_solutions}
+                            </p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                )}
+                ))}
               </div>
-            )}
+            </div>
+            </div>
+
+
 
             {/* Action Buttons */}
+           
+
+            {/* Action Button */}
             <div style={{
               display: 'flex',
               flexDirection: 'column',
               gap: '12px',
+              alignItems: 'center',
             }}>
               <button
                 onClick={handleAddAnotherViolation}
@@ -2426,7 +3224,7 @@ export default function Dashboard() {
                   borderRadius: '12px',
                   color: '#ffffff',
                   fontWeight: 600,
-                  fontSize: '0.95rem',
+                  fontSize: '0.9rem',
                   padding: '12px 20px',
                   cursor: 'pointer',
                   transition: 'all 0.2s ease',
@@ -2435,306 +3233,31 @@ export default function Dashboard() {
                   justifyContent: 'center',
                   gap: '8px',
                   boxShadow: '0 4px 12px rgba(255, 68, 68, 0.3)',
+                  width: 'auto',
+                  minWidth: 'fit-content',
                 }}
                 onMouseOver={e => {
                   e.currentTarget.style.transform = 'translateY(-1px)';
                   e.currentTarget.style.boxShadow = '0 6px 16px rgba(255, 68, 68, 0.4)';
+                  e.currentTarget.style.background = 'linear-gradient(135deg, #ff6666, #d32f2f)';
                 }}
                 onMouseOut={e => {
                   e.currentTarget.style.transform = 'translateY(0)';
                   e.currentTarget.style.boxShadow = '0 4px 12px rgba(255, 68, 68, 0.3)';
+                  e.currentTarget.style.background = 'linear-gradient(135deg, #ff4444, #b71c1c)';
                 }}
               >
                 <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
                 </svg>
-                I also have this violation
-              </button>
-              <button
-                onClick={handleAddDifferentViolation}
-                style={{
-                  background: 'transparent',
-                  border: `2px solid ${isDarkMode ? '#333333' : '#e5e5e5'}`,
-                  borderRadius: '12px',
-                  color: isDarkMode ? '#ffffff' : '#1a1a1a',
-                  fontWeight: 600,
-                  fontSize: '0.95rem',
-                  padding: '12px 20px',
-                  cursor: 'pointer',
-                  transition: 'all 0.2s ease',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: '8px',
-                }}
-                onMouseOver={e => {
-                  e.currentTarget.style.background = isDarkMode ? '#333333' : '#f8f9fa';
-                  e.currentTarget.style.borderColor = '#ff4444';
-                  e.currentTarget.style.color = '#ff4444';
-                }}
-                onMouseOut={e => {
-                  e.currentTarget.style.background = 'transparent';
-                  e.currentTarget.style.borderColor = isDarkMode ? '#333333' : '#e5e5e5';
-                  e.currentTarget.style.color = isDarkMode ? '#ffffff' : '#1a1a1a';
-                }}
-              >
-                <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                <span>+ I also commit a violation here</span>
+                <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                 </svg>
-                I have another violation here
               </button>
             </div>
-
-            {/* Reports List Section */}
-            {(() => {
-              const reports = violationZones.filter((r: ViolationZone) =>
-                r.lat === selectedViolation.lat && r.lng === selectedViolation.lng
-              );
-              if (reports.length > 0) {
-                return (
-                  <div style={{
-                    background: isDarkMode ? '#1a1a1a' : '#ffffff',
-                    border: `1px solid ${isDarkMode ? '#333333' : '#e5e5e5'}`,
-                    borderRadius: '12px',
-                    padding: '20px',
-                    boxShadow: isDarkMode ? '0 2px 8px rgba(0,0,0,0.2)' : '0 2px 8px rgba(0,0,0,0.05)',
-                  }}>
-                    <div style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '8px',
-                      marginBottom: '16px',
-                    }}>
-                      <div style={{
-                        background: '#ff4444',
-                        borderRadius: '6px',
-                        width: '24px',
-                        height: '24px',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                      }}>
-                        <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="#fff">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-                        </svg>
-                    </div>
-                      <h3 style={{
-                        fontSize: '1rem',
-                        fontWeight: 600,
-                        color: isDarkMode ? '#ffffff' : '#1a1a1a',
-                        margin: 0,
-                      }}>
-                        Reports for this location ({reports.length})
-                      </h3>
-                    </div>
-                    <div style={{
-                      maxHeight: '200px',
-                      overflowY: 'auto',
-                      paddingRight: '8px',
-                    }}>
-                      {reports.map((r, i) => (
-                        <div key={r.id + '-' + i} style={{
-                          background: isDarkMode ? '#0f0f0f' : '#f8f9fa',
-                          border: `1px solid ${isDarkMode ? '#333333' : '#e5e5e5'}`,
-                          borderRadius: '8px',
-                          padding: '16px',
-                          marginBottom: '12px',
-                          fontSize: '0.875rem',
-                          transition: 'all 0.2s ease',
-                        }}
-                        onMouseOver={e => {
-                          e.currentTarget.style.transform = 'translateY(-1px)';
-                          e.currentTarget.style.boxShadow = isDarkMode ? '0 4px 12px rgba(0,0,0,0.3)' : '0 4px 12px rgba(0,0,0,0.1)';
-                        }}
-                        onMouseOut={e => {
-                          e.currentTarget.style.transform = 'translateY(0)';
-                          e.currentTarget.style.boxShadow = 'none';
-                        }}
-                        >
-                          <div style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '8px',
-                            marginBottom: '8px',
-                        }}>
-                            <div style={{
-                              background: '#ff4444',
-                              borderRadius: '4px',
-                              width: '16px',
-                              height: '16px',
-                              display: 'flex',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                            }}>
-                              <svg width="10" height="10" fill="none" viewBox="0 0 24 24" stroke="#fff">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                              </svg>
-                            </div>
-                            <span style={{
-                              fontWeight: 600,
-                              color: '#ff4444',
-                              fontSize: '0.8rem',
-                            }}>
-                              {r.violation_type}
-                            </span>
-                          </div>
-
-                          <div style={{
-                            color: isDarkMode ? '#cccccc' : '#666666',
-                            marginBottom: '8px',
-                            lineHeight: '1.4',
-                          }}>
-                            <strong style={{ color: isDarkMode ? '#ffffff' : '#1a1a1a' }}>Reasons:</strong> {r.reasons}
-                          </div>
-                          <div style={{
-                            color: isDarkMode ? '#cccccc' : '#666666',
-                            lineHeight: '1.4',
-                          }}>
-                            <strong style={{ color: isDarkMode ? '#ffffff' : '#1a1a1a' }}>Solutions:</strong> {r.solutions}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-    </div>
-  );
-}
-              return null;
-            })()}
           </div>
-            {/* Violation Statistics Graph */}
-          {(() => {
-            const reports = violationZones.filter((r: ViolationZone) =>
-              r.lat === selectedViolation.lat && r.lng === selectedViolation.lng
-            );
-            const typeCounts: Record<string, number> = {};
-            reports.forEach((r: ViolationZone) => {
-              typeCounts[r.violation_type] = (typeCounts[r.violation_type] || 0) + 1;
-            });
-            const maxCount = Math.max(1, ...Object.values(typeCounts));
-            return (
-              <div style={{
-                  background: isDarkMode ? '#1a1a1a' : '#ffffff',
-                  border: `1px solid ${isDarkMode ? '#333333' : '#e5e5e5'}`,
-                  borderRadius: '12px',
-                  padding: '20px',
-                  boxShadow: isDarkMode ? '0 2px 8px rgba(0,0,0,0.2)' : '0 2px 8px rgba(0,0,0,0.05)',
-                }}>
-                  <div style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '8px',
-                    marginBottom: '16px',
-                  }}>
-                    <div style={{
-                      background: '#ff4444',
-                      borderRadius: '6px',
-                      width: '24px',
-                      height: '24px',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                    }}>
-                      <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="#fff">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-                      </svg>
-                    </div>
-                    <h3 style={{
-                      fontSize: '1rem',
-                      fontWeight: 600,
-                      color: isDarkMode ? '#ffffff' : '#1a1a1a',
-                      margin: 0,
-                    }}>
-                      Violation Statistics
-                    </h3>
-                </div>
-                {Object.keys(typeCounts).length === 0 ? (
-                    <div style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      padding: '40px 20px',
-                      color: isDarkMode ? '#888888' : '#999999',
-                      fontSize: '0.9rem',
-                      fontStyle: 'italic',
-                    }}>
-                      <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor" style={{ marginRight: '8px' }}>
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-                      </svg>
-                      No reports yet for this location
-                    </div>
-                  ) : (
-                        <div style={{
-                      display: 'flex', 
-                      flexDirection: 'column', 
-                      gap: '16px',
-                      padding: '8px 0',
-                    }}>
-                      {Object.entries(typeCounts).map(([type, count], index) => (
-                        <div key={type} style={{
-                          display: 'flex',
-                          flexDirection: 'column',
-                          gap: '8px',
-                        }}>
-                          <div style={{
-                            display: 'flex',
-                            justifyContent: 'space-between',
-                            alignItems: 'center',
-                          }}>
-                            <span style={{
-                              fontSize: '0.85rem',
-                              fontWeight: 600,
-                              color: isDarkMode ? '#ffffff' : '#1a1a1a',
-                              flex: 1,
-                            }}>
-                              {type}
-                            </span>
-                            <span style={{
-                              fontSize: '0.8rem',
-                              fontWeight: 700,
-                              color: '#ff4444',
-                              minWidth: '20px',
-                              textAlign: 'right',
-                            }}>
-                              {count}
-                            </span>
-                          </div>
-                          <div style={{
-                            position: 'relative',
-                            height: '24px',
-                            background: isDarkMode ? '#333333' : '#e5e5e5',
-                            borderRadius: '12px',
-                            overflow: 'hidden',
-                            boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.1)',
-                          }}>
-                            <div style={{
-                              height: '100%',
-                              background: `linear-gradient(135deg, #ff4444, #b71c1c)`,
-                              borderRadius: '12px',
-                              width: `${Math.max(4, (count / maxCount) * 100)}%`,
-                              transition: 'width 0.8s ease-out',
-                              boxShadow: '0 2px 8px rgba(255, 68, 68, 0.4)',
-                              position: 'relative',
-                            }}>
-                              {/* Bar shine effect */}
-                              <div style={{
-                                position: 'absolute',
-                                top: '0',
-                                left: '0',
-                                right: '0',
-                                height: '50%',
-                                background: 'linear-gradient(180deg, rgba(255,255,255,0.2) 0%, transparent 100%)',
-                                borderRadius: '12px 12px 0 0',
-                              }} />
-                            </div>
-                          </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })()}
-        </div>
+       
       )}
       {/* Graph Card Side Panel */}
       {showGraph && (
@@ -2869,14 +3392,14 @@ export default function Dashboard() {
                     color: '#ff4444',
                     marginBottom: '6px',
                   }}>
-                    {violationZones.length}
+                    {locations.length}
                   </div>
                   <div style={{
                     fontSize: '0.8rem',
                     color: isDarkMode ? '#888' : '#666',
                     fontWeight: 500,
                   }}>
-                    Total Reports
+                    Total Locations
                   </div>
                 </div>
               </div>
@@ -2919,9 +3442,14 @@ export default function Dashboard() {
 
                 {(() => {
                   const typeCounts: Record<string, number> = {};
-                  violationZones.forEach((r: ViolationZone) => {
-                    typeCounts[r.violation_type] = (typeCounts[r.violation_type] || 0) + 1;
+                  
+                  // Count from locations
+                  locations.forEach((location: Location) => {
+                    location.violations.forEach((violation) => {
+                      typeCounts[violation.violation_type] = (typeCounts[violation.violation_type] || 0) + violation.reports.length;
+                    });
                   });
+                  
                   const sortedTypes = Object.entries(typeCounts).sort((a, b) => b[1] - a[1]);
                   const maxCount = Math.max(1, ...Object.values(typeCounts));
 
@@ -3018,7 +3546,7 @@ export default function Dashboard() {
                     justifyContent: 'center',
                   }}>
                     <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="#fff">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0 1 18 0z" />
                     </svg>
                   </div>
                   <h4 style={{
@@ -3035,49 +3563,74 @@ export default function Dashboard() {
                   maxHeight: '120px',
                   overflowY: 'auto',
                 }}>
-                  {violationZones.slice(0, 5).map((report: ViolationZone, index: number) => (
-                    <div key={index} style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '10px',
-                      padding: '8px 0',
-                      borderBottom: index < 4 ? `1px solid ${isDarkMode ? '#333' : '#e9ecef'}` : 'none',
-                    }}>
-                      <div style={{
-                        background: '#ff4444',
-                        borderRadius: '50%',
-                        width: '24px',
-                        height: '24px',
+                  {(() => {
+                    // Get recent reports from locations
+                    const allReports: Array<{
+                      type: string;
+                      date: string;
+                    }> = [];
+                    
+                    // Add location violations
+                    locations.forEach((location: Location) => {
+                      location.violations.forEach((violation) => {
+                        violation.reports.forEach((report) => {
+                          allReports.push({
+                            type: violation.violation_type,
+                            date: report.created_at
+                          });
+                        });
+                      });
+                    });
+                    
+                    // Sort by date (newest first) and take first 5
+                    const recentReports = allReports
+                      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+                      .slice(0, 5);
+                    
+                    return recentReports.map((report, index: number) => (
+                      <div key={index} style={{
                         display: 'flex',
                         alignItems: 'center',
-                        justifyContent: 'center',
-                        flexShrink: 0,
-                      }}>
-                        <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="#fff">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                        </svg>
-                      </div>
-                      <div style={{
-                        flex: 1,
-                        minWidth: 0,
+                        gap: '10px',
+                        padding: '8px 0',
+                        borderBottom: index < 4 ? `1px solid ${isDarkMode ? '#333' : '#e9ecef'}` : 'none',
                       }}>
                         <div style={{
-                          fontSize: '0.8rem',
-                          fontWeight: 600,
-                          color: isDarkMode ? '#ffffff' : '#1a1a1a',
-                          marginBottom: '2px',
+                          background: '#ff4444',
+                          borderRadius: '50%',
+                          width: '24px',
+                          height: '24px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          flexShrink: 0,
                         }}>
-                          {report.violation_type}
+                          <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="#fff">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0 1 18 0z" />
+                          </svg>
                         </div>
                         <div style={{
-                          fontSize: '0.7rem',
-                          color: isDarkMode ? '#888' : '#666',
+                          flex: 1,
+                          minWidth: 0,
                         }}>
-                          {new Date(report.created_at).toLocaleDateString()} • {new Date(report.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                          <div style={{
+                            fontSize: '0.8rem',
+                            fontWeight: 600,
+                            color: isDarkMode ? '#ffffff' : '#1a1a1a',
+                            marginBottom: '2px',
+                          }}>
+                            {report.type}
+                          </div>
+                          <div style={{
+                            fontSize: '0.7rem',
+                            color: isDarkMode ? '#888' : '#666',
+                          }}>
+                            {new Date(report.date).toLocaleDateString()} • {new Date(report.date).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  ))}
+                    ));
+                  })()}
                 </div>
               </div>
 
@@ -3119,12 +3672,19 @@ export default function Dashboard() {
                 </div>
 
                 {(() => {
-                  const locationCounts: Record<string, number> = {};
-                  violationZones.forEach((r: ViolationZone) => {
-                    const key = `${r.lat.toFixed(4)},${r.lng.toFixed(4)}`;
-                    locationCounts[key] = (locationCounts[key] || 0) + 1;
+                  const violationTypeCounts: Record<string, number> = {};
+                  
+                  // Count violation types from all locations
+                  locations.forEach((location: Location) => {
+                    location.violations.forEach((violation) => {
+                      const violationType = violation.violation_type;
+                      violationTypeCounts[violationType] = (violationTypeCounts[violationType] || 0) + violation.reports.length;
+                    });
                   });
-                  const sortedLocations = Object.entries(locationCounts).sort((a, b) => b[1] - a[1]).slice(0, 3);
+                  
+                  const sortedViolations = Object.entries(violationTypeCounts)
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 3);
 
                   return (
                     <div style={{
@@ -3132,8 +3692,8 @@ export default function Dashboard() {
                       flexDirection: 'column',
                       gap: '8px',
                     }}>
-                      {sortedLocations.map(([location, count], index) => (
-                        <div key={location} style={{
+                      {sortedViolations.map(([violationType, count], index) => (
+                        <div key={violationType} style={{
                           display: 'flex',
                           alignItems: 'center',
                           gap: '10px',
@@ -3160,8 +3720,9 @@ export default function Dashboard() {
                             flex: 1,
                             fontSize: '0.75rem',
                             color: isDarkMode ? '#cccccc' : '#666666',
+                            fontWeight: 500,
                           }}>
-                            {location}
+                            {violationType}
                           </div>
                           <div style={{
                             fontSize: '0.75rem',
@@ -3172,6 +3733,41 @@ export default function Dashboard() {
                           </div>
                         </div>
                       ))}
+                      {Object.keys(violationTypeCounts).length > 3 && (
+                        <div style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '10px',
+                          padding: '6px 12px',
+                          background: isDarkMode ? '#1a1a1a' : '#ffffff',
+                          border: `1px solid ${isDarkMode ? '#333' : '#e9ecef'}`,
+                          borderRadius: '8px',
+                          opacity: 0.7,
+                        }}>
+                          <div style={{
+                            background: '#666666',
+                            borderRadius: '50%',
+                            width: '20px',
+                            height: '20px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            fontSize: '0.7rem',
+                            fontWeight: 700,
+                            color: '#fff',
+                          }}>
+                            ...
+                          </div>
+                          <div style={{
+                            flex: 1,
+                            fontSize: '0.75rem',
+                            color: isDarkMode ? '#888888' : '#999999',
+                            fontStyle: 'italic',
+                          }}>
+                            {Object.keys(violationTypeCounts).length - 3} more violation types
+                          </div>
+                        </div>
+                      )}
                     </div>
                   );
                 })()}
@@ -3293,13 +3889,259 @@ export default function Dashboard() {
           </div>
         </div>
       )}
+            {/* Route Violation Zones Card */}
+      {(() => {
+        console.log('🔍 Checking route violation panel conditions:', { 
+          hasDirectionsData: !!directionsData, 
+          routeViolationZonesCount: routeViolationZones.length,
+          routeViolationZones: routeViolationZones,
+          selectedViolation: !!selectedViolation
+        });
+        return directionsData && routeViolationZones.length > 0 && !selectedViolation;
+      })() && (
+        <div 
+          className="violation-zones-card"
+          style={{
+            position: 'fixed',
+            bottom: '80px',
+            right: '20px',
+            left: '20px',
+            width: 'auto',
+            maxWidth: '320px',
+            height: '200px',
+            background: isDarkMode ? 'rgba(26, 26, 26, 0.98)' : 'rgba(255, 255, 255, 0.98)',
+            borderRadius: '16px',
+            boxShadow: '0 12px 32px rgba(255, 68, 68, 0.3)',
+            zIndex: 1000,
+            backdropFilter: 'blur(20px)',
+            border: `2px solid #ff4444`,
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+            margin: '0 auto',
+            animation: 'pulse 2s infinite',
+          }}>
+          {/* Header */}
+          <div style={{
+            padding: '12px 16px',
+            background: 'linear-gradient(135deg, #ff4444, #b71c1c)',
+            color: '#ffffff',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            borderBottom: '1px solid rgba(255, 255, 255, 0.2)',
+          }}>
+            <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
+            </svg>
+            <span style={{ fontSize: '0.875rem', fontWeight: 600 }}>
+              Route Violations ({routeViolationZones.length})
+            </span>
+          </div>
+          {/* Scrollable Content */}
+          <div style={{
+            flex: 1,
+            overflowY: 'auto',
+            padding: '12px 16px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '10px',
+          }}>
+            {routeViolationZones.map((zone, index) => (
+                              <div
+                key={zone.id}
+                style={{
+                  background: isDarkMode ? 'rgba(26, 26, 26, 0.8)' : 'rgba(255, 255, 255, 0.8)',
+                  border: `1px solid ${isDarkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)'}`,
+                  borderRadius: '8px',
+                  padding: '8px 10px',
+                  transition: 'all 0.2s ease',
+                  cursor: 'pointer',
+                  backdropFilter: 'blur(10px)',
+                }}
+                onMouseOver={e => {
+                  e.currentTarget.style.transform = 'translateY(-1px)';
+                  e.currentTarget.style.boxShadow = '0 4px 12px rgba(0, 0, 0, 0.15)';
+                  e.currentTarget.style.background = isDarkMode ? 'rgba(26, 26, 26, 0.9)' : 'rgba(255, 255, 255, 0.9)';
+                }}
+                onMouseOut={e => {
+                  e.currentTarget.style.transform = 'translateY(0)';
+                  e.currentTarget.style.boxShadow = 'none';
+                  e.currentTarget.style.background = isDarkMode ? 'rgba(26, 26, 26, 0.8)' : 'rgba(255, 255, 255, 0.8)';
+                }}
+                onClick={() => {
+                  const violationData = {
+                    type: zone.violation_type,
+                    reasons: zone.reasons,
+                    solutions: zone.solutions,
+                    lat: zone.lat,
+                    lng: zone.lng,
+                  };
+                  showSelectedViolationOnMap(violationData);
+                  // Don't clear route violation zones - keep them visible
+                }}
+              >
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  gap: '10px',
+                }}>
+                  <div style={{
+                    background: '#ff4444',
+                    borderRadius: '4px',
+                    width: '20px',
+                    height: '20px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    flexShrink: 0,
+                  }}>
+                    <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="#fff">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                    </svg>
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      marginBottom: '6px',
+                    }}>
+                      <div style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                      }}>
+                        <h4 style={{
+                          fontSize: '0.875rem',
+                          fontWeight: 700,
+                          color: '#ff4444',
+                          margin: 0,
+                          textTransform: 'uppercase',
+                          letterSpacing: '0.5px',
+                        }}>
+                          {zone.violation_type || 'Unknown Violation'}
+                        </h4>
+                        <div style={{
+                          background: '#ff4444',
+                          color: '#ffffff',
+                          fontSize: '0.5rem',
+                          fontWeight: 600,
+                          padding: '1px 4px',
+                          borderRadius: '6px',
+                        }}>
+                          #{index + 1}
+                        </div>
+                      </div>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const violationData = {
+                            type: zone.violation_type,
+                            reasons: zone.reasons,
+                            solutions: zone.solutions,
+                            lat: zone.lat,
+                            lng: zone.lng,
+                          };
+                          setSelectedViolation(violationData);
+                        }}
+                        style={{
+                          background: 'transparent',
+                          border: 'none',
+                          borderRadius: '4px',
+                          width: '16px',
+                          height: '16px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          cursor: 'pointer',
+                          transition: 'all 0.2s ease',
+                          color: isDarkMode ? 'rgba(255, 255, 255, 0.6)' : 'rgba(0, 0, 0, 0.5)',
+                        }}
+                        onMouseOver={e => {
+                          e.currentTarget.style.background = 'rgba(255, 68, 68, 0.1)';
+                          e.currentTarget.style.color = '#ff4444';
+                        }}
+                        onMouseOut={e => {
+                          e.currentTarget.style.background = 'transparent';
+                          e.currentTarget.style.color = isDarkMode ? 'rgba(255, 255, 255, 0.6)' : 'rgba(0, 0, 0, 0.5)';
+                        }}
+                        title="More Information"
+                      >
+                        <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0 1 18 0z" />
+                        </svg>
+                      </button>
+                    </div>
+                    <div style={{
+                      fontSize: '0.5rem',
+                      color: isDarkMode ? 'rgba(255, 255, 255, 0.5)' : 'rgba(0, 0, 0, 0.4)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '3px',
+                      marginBottom: '4px',
+                    }}>
+                      <svg width="8" height="8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                      </svg>
+                      {zone.address || `Near ${zone.lat.toFixed(4)}, ${zone.lng.toFixed(4)}`}
+                    </div>
+                    {zone.reasons && (
+                      <p style={{
+                        fontSize: '0.625rem',
+                        color: isDarkMode ? 'rgba(255, 255, 255, 0.7)' : 'rgba(0, 0, 0, 0.6)',
+                        margin: 0,
+                        lineHeight: '1.2',
+                        display: '-webkit-box',
+                        WebkitLineClamp: 2,
+                        WebkitBoxOrient: 'vertical',
+                        overflow: 'hidden',
+                        fontStyle: 'italic',
+                      }}>
+                        {zone.reasons}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       {/* Responsive mobile style: adjust padding/font size for mobile */}
       <style>{`
+        @keyframes pulse {
+          0%, 100% { box-shadow: 0 12px 32px rgba(255, 68, 68, 0.3); }
+          50% { box-shadow: 0 12px 32px rgba(255, 68, 68, 0.6); }
+        }
+        
+        @keyframes slideDown {
+          from {
+            opacity: 0;
+            transform: translateY(-10px) scale(0.95);
+          }
+          to {
+            opacity: 1;
+            transform: translateY(0) scale(1);
+          }
+        }
+        
         @media (max-width: 640px) {
           .violation-panel-content { padding: 24px 10px 16px 10px !important; font-size: 1rem !important; }
           .violation-panel-content h2 { font-size: 1.1rem !important; }
         }
+        
+        /* Responsive violation zones card */
+        @media (min-width: 768px) {
+          .violation-zones-card {
+            left: auto !important;
+            margin: 0 !important;
+            width: 320px !important;
+          }
+        }
       `}</style>
     </div>
+
   );
 } 
