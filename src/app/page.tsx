@@ -8,6 +8,8 @@
 import { useEffect, useRef, useState } from "react";
 import { violationsApi } from "../lib/api";
 import { Location } from "../lib/supabase";
+import { SimpleThemeToggle } from "@/components/theme-toggle";
+import { useTheme } from "@/components/theme-provider";
 
 
 // Global variable to track if script is already loading
@@ -192,8 +194,11 @@ export default function Dashboard() {
   const [selectedLocation, setSelectedLocation] = useState<any>(null);
   const [showMenu, setShowMenu] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [isDarkMode, setIsDarkMode] = useState(true);
   const [highlightRoads, setHighlightRoads] = useState(true);
+  
+  // Use theme context with fallback
+  const themeContext = useTheme();
+  const isDarkMode = themeContext.effectiveTheme === 'dark';
   const [isDrivingMode, setIsDrivingMode] = useState(false);
   const drivingWatchId = useRef<number | null>(null);
   const [violationPolygons, setViolationPolygons] = useState<google.maps.Polygon[]>([]);
@@ -223,17 +228,30 @@ export default function Dashboard() {
   const [selectedViolationMarker, setSelectedViolationMarker] = useState<google.maps.Marker | null>(null);
   const [selectedViolation, setSelectedViolation] = useState<any>(null);
 
-  // Settings state
-  const [proximityAlerts, setProximityAlerts] = useState(true);
-  const [soundAlerts, setSoundAlerts] = useState(true);
+  // Settings state with localStorage persistence - use default values for SSR
+  const [proximityAlerts, setProximityAlerts] = useState(false);
+  const [soundAlerts, setSoundAlerts] = useState(false);
   const [vibrationAlerts, setVibrationAlerts] = useState(false);
-  const [alertDistance, setAlertDistance] = useState(200);
   const [language, setLanguage] = useState('en');
-  const [notificationsEnabled, setNotificationsEnabled] = useState(true);
+  const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   
-  // Permission states
+  // Permission states - use default values for SSR
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>('default');
   const [vibrationSupported, setVibrationSupported] = useState(false);
+  
+  // Simple proximity notification state
+  const [proximityNotification, setProximityNotification] = useState<{
+    show: boolean;
+    message: string;
+    type: 'warning' | 'danger' | 'info';
+  }>({
+    show: false,
+    message: '',
+    type: 'warning'
+  });
+
+  // Hydration-safe state to prevent SSR/client mismatch
+  const [isClient, setIsClient] = useState(false);
 
   const [formData, setFormData] = useState({
     violationType: "",
@@ -311,6 +329,33 @@ export default function Dashboard() {
     // Check vibration support
     if ('vibrate' in navigator) {
       setVibrationSupported(true);
+    }
+  }, []);
+
+  // Load localStorage values after component mounts (client-side only)
+  useEffect(() => {
+    // Mark as client-side
+    setIsClient(true);
+    
+    // Load notification settings from localStorage
+    const storedProximityAlerts = localStorage.getItem('proximityAlerts');
+    if (storedProximityAlerts !== null) {
+      setProximityAlerts(JSON.parse(storedProximityAlerts));
+    }
+
+    const storedSoundAlerts = localStorage.getItem('soundAlerts');
+    if (storedSoundAlerts !== null) {
+      setSoundAlerts(JSON.parse(storedSoundAlerts));
+    }
+
+    const storedVibrationAlerts = localStorage.getItem('vibrationAlerts');
+    if (storedVibrationAlerts !== null) {
+      setVibrationAlerts(JSON.parse(storedVibrationAlerts));
+    }
+
+    const storedNotificationsEnabled = localStorage.getItem('notificationsEnabled');
+    if (storedNotificationsEnabled !== null) {
+      setNotificationsEnabled(JSON.parse(storedNotificationsEnabled));
     }
   }, []);
 
@@ -713,45 +758,71 @@ export default function Dashboard() {
     }
   };
 
-  // Driving Mode: Center map on user and keep updated
+  // Proximity monitoring when alerts are enabled
   useEffect(() => {
-    if (!map) return;
-    if (isDrivingMode) {
-      if (typeof window !== 'undefined' && 'geolocation' in navigator) {
-        drivingWatchId.current = navigator.geolocation.watchPosition((position) => {
-          const { latitude, longitude } = position.coords;
-          map.setCenter({ lat: latitude, lng: longitude });
-          
-          // Check proximity to violation zones
-          checkProximityToViolations(latitude, longitude);
-        });
-      }
-    } else {
-      if (drivingWatchId.current !== null) {
-        navigator.geolocation.clearWatch(drivingWatchId.current);
-        drivingWatchId.current = null;
-      }
+    if (!map || !proximityAlerts) return;
+    
+    if (typeof window !== 'undefined' && 'geolocation' in navigator) {
+      drivingWatchId.current = navigator.geolocation.watchPosition((position) => {
+        const { latitude, longitude } = position.coords;
+        
+        // Check proximity to violation zones
+        checkProximityToViolations(latitude, longitude);
+      });
     }
-    // Cleanup on unmount or mode change
+    
+    // Cleanup on unmount or when alerts are disabled
     return () => {
       if (drivingWatchId.current !== null) {
         navigator.geolocation.clearWatch(drivingWatchId.current);
         drivingWatchId.current = null;
       }
     };
-  }, [isDrivingMode, map, proximityAlerts, alertDistance, locations]);
+  }, [proximityAlerts, map, locations]);
 
   // User location marker will be managed by driving mode
 
-  // Function to play alert sound
+  // Function to play alert sound using Web Audio API
   const playAlertSound = () => {
     if (soundAlerts) {
       try {
-        const audio = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hVFApGn+DyvmwhBSuBzvLZiTYIG2m98OScTgwOUarm7blmGgU7k9n1unEiBC13yO/eizEIHWq+8+OWT');
-        audio.volume = 0.3;
-        audio.play().catch(e => console.log('Audio play failed:', e));
+        // Create audio context
+        const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+        
+        // Create oscillator for alert sound
+        const oscillator = audioContext.createOscillator();
+        const gainNode = audioContext.createGain();
+        
+        // Connect nodes
+        oscillator.connect(gainNode);
+        gainNode.connect(audioContext.destination);
+        
+        // Configure sound
+        oscillator.type = 'sine';
+        oscillator.frequency.setValueAtTime(800, audioContext.currentTime); // 800Hz tone
+        oscillator.frequency.setValueAtTime(600, audioContext.currentTime + 0.1); // Drop to 600Hz
+        
+        // Configure volume
+        gainNode.gain.setValueAtTime(0, audioContext.currentTime);
+        gainNode.gain.linearRampToValueAtTime(0.3, audioContext.currentTime + 0.01);
+        gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.3);
+        
+        // Play the sound
+        oscillator.start(audioContext.currentTime);
+        oscillator.stop(audioContext.currentTime + 0.3);
+        
+        console.log('✅ Alert sound played successfully');
       } catch (error) {
-        console.log('Audio not supported');
+        console.error('❌ Audio play failed:', error);
+        // Fallback to simple beep using Audio constructor
+        try {
+          const audio = new Audio();
+          audio.src = 'data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hVFApGn+DyvmwhBSuBzvLZiTYIG2m98OScTgwOUarm7blmGgU7k9n1unEiBC13yO/eizEIHWq+8+OWT';
+          audio.volume = 0.3;
+          audio.play().catch(e => console.log('Fallback audio failed:', e));
+        } catch (fallbackError) {
+          console.log('Audio not supported on this device');
+        }
       }
     }
   };
@@ -760,9 +831,11 @@ export default function Dashboard() {
   const triggerVibration = () => {
     if (vibrationAlerts && 'vibrate' in navigator) {
       try {
-        navigator.vibrate([200, 100, 200]);
+        // Alert vibration pattern: long-short-long (more noticeable)
+        navigator.vibrate([300, 100, 300]);
+        console.log('✅ Vibration triggered');
       } catch (error) {
-        console.log('Vibration not supported');
+        console.error('❌ Vibration failed:', error);
       }
     }
   };
@@ -785,10 +858,13 @@ export default function Dashboard() {
 
   // Function to trigger all alerts
   const triggerAlerts = (title: string, body: string) => {
+    console.log('🔔 Triggering alerts:', { title, body });
     showNotification(title, body);
     playAlertSound();
     triggerVibration();
   };
+
+
 
   // Permission request handlers
   const requestNotificationPermission = async () => {
@@ -818,17 +894,19 @@ export default function Dashboard() {
     }
   };
 
-  // Enhanced toggle handlers with permission requests
+  // Enhanced toggle handlers with permission requests and localStorage
   const handleNotificationsToggle = async () => {
     if (!notificationsEnabled) {
       // Turning ON notifications - request permission
       const permissionGranted = await requestNotificationPermission();
       if (permissionGranted) {
         setNotificationsEnabled(true);
+        localStorage.setItem('notificationsEnabled', 'true');
       }
     } else {
       // Turning OFF notifications
       setNotificationsEnabled(false);
+      localStorage.setItem('notificationsEnabled', 'false');
     }
   };
 
@@ -836,18 +914,41 @@ export default function Dashboard() {
     if (!soundAlerts) {
       // Turning ON sound alerts - test if audio works
       try {
-        const audio = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hVFApGn+DyvmwhBSuBzvLZiTYIG2m98OScTgwOUarm7blmGgU7k9n1unEiBC13yO/eizEIHWq+8+OWT');
-        audio.volume = 0.1;
-        await audio.play();
+        // Create audio context
+        const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+        
+        // Create oscillator for test sound
+        const oscillator = audioContext.createOscillator();
+        const gainNode = audioContext.createGain();
+        
+        // Connect nodes
+        oscillator.connect(gainNode);
+        gainNode.connect(audioContext.destination);
+        
+        // Configure test sound (shorter and quieter)
+        oscillator.type = 'sine';
+        oscillator.frequency.setValueAtTime(600, audioContext.currentTime);
+        
+        // Configure volume
+        gainNode.gain.setValueAtTime(0, audioContext.currentTime);
+        gainNode.gain.linearRampToValueAtTime(0.1, audioContext.currentTime + 0.01);
+        gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.2);
+        
+        // Play the test sound
+        oscillator.start(audioContext.currentTime);
+        oscillator.stop(audioContext.currentTime + 0.2);
+        
         setSoundAlerts(true);
+        localStorage.setItem('soundAlerts', 'true');
         console.log('✅ Sound alerts enabled');
       } catch (error) {
         console.error('❌ Sound test failed:', error);
-        alert('Sound alerts are not supported or blocked in this browser.');
+        alert('Sound alerts are not supported or blocked in this browser. Please check your browser settings.');
       }
     } else {
       // Turning OFF sound alerts
       setSoundAlerts(false);
+      localStorage.setItem('soundAlerts', 'false');
     }
   };
 
@@ -856,35 +957,71 @@ export default function Dashboard() {
       // Turning ON vibration alerts - test if vibration works
       if (vibrationSupported) {
         try {
-          navigator.vibrate([100]);
+          // Test vibration pattern: short-short-long
+          navigator.vibrate([100, 50, 100, 50, 200]);
           setVibrationAlerts(true);
+          localStorage.setItem('vibrationAlerts', 'true');
           console.log('✅ Vibration alerts enabled');
         } catch (error) {
           console.error('❌ Vibration test failed:', error);
           alert('Vibration is not supported on this device.');
         }
       } else {
-        alert('Vibration is not supported on this device.');
+        alert('Vibration is not supported on this device. Please check if your device supports vibration.');
       }
     } else {
       // Turning OFF vibration alerts
       setVibrationAlerts(false);
+      localStorage.setItem('vibrationAlerts', 'false');
     }
   };
 
   // Function to check proximity to violation locations
   const checkProximityToViolations = (userLat: number, userLng: number) => {
-    if (!proximityAlerts || !isDrivingMode) return;
+    // Debug logging
+    console.log('🔍 Checking proximity:', {
+      proximityAlerts,
+      notificationsEnabled,
+      userLat,
+      userLng,
+      locationsCount: locations.length
+    });
 
-    // Check locations
+    // Only require proximityAlerts to be enabled (remove driving mode requirement)
+    if (!proximityAlerts) {
+      console.log('❌ Proximity alerts disabled');
+      return;
+    }
+
+    // Check locations with fixed 100m distance
+    const ALERT_DISTANCE = 100; // Fixed 100 meters
+
     locations.forEach((location: Location) => {
       const distance = calculateDistance(userLat, userLng, location.lat, location.lng);
       
-      if (distance <= alertDistance && location.violations.length > 0) {
-        const violationTypes = location.violations.map(v => v.violation_type).join(', ');
-        const title = 'Violation Location Ahead!';
-        const body = `${violationTypes} violations detected within ${Math.round(distance)}m`;
-        triggerAlerts(title, body);
+      console.log(`📍 Distance to ${location.violations.map(v => v.violation_type).join(', ')}: ${Math.round(distance)}m`);
+      
+      if (distance <= ALERT_DISTANCE && location.violations.length > 0) {
+        console.log('🚨 ALERT TRIGGERED! User in violation zone');
+        
+        const violationTypes = location.violations.map(v => v.violation_type);
+        const title = '🚨 Violation Zone Detected!';
+        const message = `You are within ${Math.round(distance)}m of a violation zone.`;
+        
+        // Show simple notification
+        setProximityNotification({
+          show: true,
+          message: `🚨 You are within ${Math.round(distance)}m of a violation zone!`,
+          type: 'danger'
+        });
+        
+        // Auto-hide after 5 seconds
+        setTimeout(() => {
+          setProximityNotification(prev => ({ ...prev, show: false }));
+        }, 5000);
+        
+        // Also trigger other alerts (sound, vibration, browser notifications)
+        triggerAlerts(title, `${violationTypes.join(', ')} violations detected within ${Math.round(distance)}m`);
       }
     });
   };
@@ -1653,8 +1790,17 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Map background */}
-      <div ref={mapRef} className="absolute inset-0 w-full h-full" />
+              {/* Map background */}
+        <div 
+          ref={mapRef} 
+          className="absolute inset-0 w-full h-full" 
+          style={{ 
+            touchAction: 'pan-x pan-y pinch-zoom',
+            WebkitOverflowScrolling: 'touch',
+            WebkitUserSelect: 'none',
+            userSelect: 'none'
+          }}
+        />
       
       {/* Top Bar: Search + Directions + Hamburger in one row */}
       <div className="absolute top-2 sm:top-4 md:top-6 left-1/2 -translate-x-1/2 w-full max-w-[95%] sm:max-w-2xl lg:max-w-4xl z-10 flex flex-row items-center justify-center gap-x-1 sm:gap-x-2 px-2 sm:px-0">
@@ -1840,15 +1986,17 @@ export default function Dashboard() {
                 <line x1="3" y1="18" x2="21" y2="18" strokeWidth="2"/>
               </svg>
               
-              {/* Notification indicator */}
-              <div 
-                className="absolute -top-1 -right-1 w-3 h-3 bg-red-500 rounded-full animate-pulse"
-                style={{ 
-                  opacity: notificationsEnabled ? 0.8 : 0,
-                  transform: notificationsEnabled ? 'scale(1)' : 'scale(0)',
-                  transition: 'all 0.3s ease'
-                }}
-              />
+              {/* Notification indicator - only show after client hydration */}
+              {isClient && (
+                <div 
+                  className="absolute -top-1 -right-1 w-3 h-3 bg-red-500 rounded-full animate-pulse"
+                  style={{ 
+                    opacity: notificationsEnabled ? 0.8 : 0,
+                    transform: notificationsEnabled ? 'scale(1)' : 'scale(0)',
+                    transition: 'all 0.3s ease'
+                  }}
+                />
+              )}
             </div>
           </button>
 
@@ -1889,10 +2037,30 @@ export default function Dashboard() {
                     setShowMenu(false);
                     setShowSettings(true);
                   }}
-                  className="w-full px-4 py-3 text-left font-medium text-sm flex items-center transition-all duration-200 hover:bg-gray-100 dark:hover:bg-gray-800 group"
-                  style={{ color: isDarkMode ? '#ffffff' : '#1a1a1a' }}
+                  className="w-full px-4 py-3 text-left font-medium text-sm flex items-center transition-all duration-200 group"
+                  style={{ 
+                    color: isDarkMode ? '#ffffff' : '#1a1a1a',
+                    backgroundColor: 'transparent'
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.backgroundColor = isDarkMode ? '#333333' : '#f8f9fa';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.backgroundColor = 'transparent';
+                  }}
                 >
-                  <div className="mr-3 p-1.5 rounded-lg transition-all duration-200 group-hover:bg-blue-100 dark:group-hover:bg-blue-900/30" style={{ backgroundColor: isDarkMode ? '#333333' : '#f8f9fa' }}>
+                  <div 
+                    className="mr-3 p-1.5 rounded-lg transition-all duration-200" 
+                    style={{ 
+                      backgroundColor: isDarkMode ? '#333333' : '#f8f9fa'
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.backgroundColor = isDarkMode ? '#4a5568' : '#e2e8f0';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.backgroundColor = isDarkMode ? '#333333' : '#f8f9fa';
+                    }}
+                  >
                     <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
@@ -1909,8 +2077,7 @@ export default function Dashboard() {
                   </svg>
                 </button>
 
-                {/* Divider */}
-                <div className="my-2 mx-4 h-px" style={{ backgroundColor: isDarkMode ? '#333333' : '#e5e5e5' }}></div>
+
 
                 {/* About Option */}
                 <button
@@ -1918,10 +2085,30 @@ export default function Dashboard() {
                     setShowMenu(false);
                     window.location.href = '/about-us';
                   }}
-                  className="w-full px-4 py-3 text-left font-medium text-sm flex items-center transition-all duration-200 hover:bg-gray-100 dark:hover:bg-gray-800 group"
-                  style={{ color: '#ff4444' }}
+                  className="w-full px-4 py-3 text-left font-medium text-sm flex items-center transition-all duration-200 group"
+                  style={{ 
+                    color: '#ff4444',
+                    backgroundColor: 'transparent'
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.backgroundColor = isDarkMode ? '#333333' : '#f8f9fa';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.backgroundColor = 'transparent';
+                  }}
                 >
-                  <div className="mr-3 p-1.5 rounded-lg transition-all duration-200 group-hover:bg-red-100 dark:group-hover:bg-red-900/30" style={{ backgroundColor: isDarkMode ? '#333333' : '#f8f9fa' }}>
+                  <div 
+                    className="mr-3 p-1.5 rounded-lg transition-all duration-200" 
+                    style={{ 
+                      backgroundColor: isDarkMode ? '#333333' : '#f8f9fa'
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.backgroundColor = isDarkMode ? '#4a5568' : '#fed7d7';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.backgroundColor = isDarkMode ? '#333333' : '#f8f9fa';
+                    }}
+                  >
                     <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0 1 18 0z" />
                     </svg>
@@ -1961,6 +2148,33 @@ export default function Dashboard() {
                       </div>
                     </div>
                   </div>
+                </div>
+
+                {/* Check Proximity Button */}
+                <div className="px-4 py-2">
+                  <button
+                    onClick={() => {
+                      if (userLocation) {
+                        checkProximityToViolations(userLocation.lat, userLocation.lng);
+                        setShowMenu(false);
+                      } else {
+                        alert('Please enable location tracking first to check proximity.');
+                      }
+                    }}
+                    className="w-full px-4 py-2 text-sm font-medium rounded-lg transition-all duration-200"
+                    style={{ 
+                      backgroundColor: '#ff4444',
+                      color: '#ffffff'
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.backgroundColor = '#e53e3e';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.backgroundColor = '#ff4444';
+                    }}
+                  >
+                    🔍 Check Current Proximity
+                  </button>
                 </div>
               </div>
             </div>
@@ -2075,6 +2289,9 @@ export default function Dashboard() {
                     });
                     setUserLocationMarker(marker);
                     setShowUserLocation(true);
+                    
+                    // Check proximity to violation zones when location is accessed
+                    checkProximityToViolations(latitude, longitude);
                     
                     console.log('Location tracking enabled!');
                   },
@@ -2615,34 +2832,7 @@ export default function Dashboard() {
                         <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-blue-600"></div>
                       </label>
                     </div>
-                    {/* Proximity Alerts (as Alert Distance) */}
-                    <div className="flex items-center justify-between p-3 rounded-lg transition-all duration-200 hover:bg-gray-50 dark:hover:bg-gray-800" style={{ 
-                      backgroundColor: isDarkMode ? '#1a1a1a' : '#ffffff',
-                      border: `1px solid ${isDarkMode ? '#333333' : '#e5e5e5'}`
-                    }}>
-                      <div className="flex flex-col gap-1">
-                        <span className="font-medium" style={{ color: isDarkMode ? '#ffffff' : '#1a1a1a' }}>Proximity Alert Distance</span>
-                        <span className="text-xs" style={{ color: isDarkMode ? '#cccccc' : '#888888' }}>How close before you get notified</span>
-                      </div>
-                      <select 
-                        value={alertDistance} 
-                        onChange={(e) => setAlertDistance(Number(e.target.value))}
-                        className="w-36 p-2 rounded-lg border transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-blue-500" 
-                        style={{ 
-                          backgroundColor: isDarkMode ? '#1a1a1a' : '#ffffff',
-                          borderColor: isDarkMode ? '#333333' : '#e5e5e5',
-                          color: isDarkMode ? '#ffffff' : '#1a1a1a',
-                          opacity: notificationsEnabled ? 1 : 0.5,
-                          pointerEvents: notificationsEnabled ? 'auto' : 'none'
-                        }}
-                        disabled={!notificationsEnabled}
-                      >
-                        <option value={100}>100 meters</option>
-                        <option value={200}>200 meters</option>
-                        <option value={500}>500 meters</option>
-                        <option value={1000}>1 kilometer</option>
-                      </select>
-                    </div>
+
                                         {/* Sound Alerts */}
                     <div className="flex items-center justify-between p-3 rounded-lg transition-all duration-200 hover:bg-gray-50 dark:hover:bg-gray-800" style={{ 
                       backgroundColor: isDarkMode ? '#1a1a1a' : '#ffffff',
@@ -2693,69 +2883,33 @@ export default function Dashboard() {
                     User Preferences
                   </h3>
                   <div className="space-y-3">
-                  <div>
-                      <label className="block text-sm font-medium mb-2" style={{ color: isDarkMode ? '#cccccc' : '#666666' }}>Language</label>
-                      <select 
-                        value={language} 
-                        onChange={(e) => setLanguage(e.target.value)}
-                        className="w-full p-3 rounded-lg border transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-blue-500" 
-                        style={{ 
-                          backgroundColor: isDarkMode ? '#1a1a1a' : '#ffffff',
-                          borderColor: isDarkMode ? '#333333' : '#e5e5e5',
-                          color: isDarkMode ? '#ffffff' : '#1a1a1a'
-                        }}
-                      >
-                        <option value="en">English</option>
-                        <option value="tl">Tagalog</option>
-                        <option value="ceb">Cebuano</option>
-                      </select>
-              </div>
+                    {/* Theme Toggle */}
                     <div className="flex items-center justify-between p-3 rounded-lg transition-all duration-200 hover:bg-gray-50 dark:hover:bg-gray-800" style={{ 
                       backgroundColor: isDarkMode ? '#1a1a1a' : '#ffffff',
                       border: `1px solid ${isDarkMode ? '#333333' : '#e5e5e5'}`
                     }}>
                       <div className="flex items-center gap-3">
-                        <span className="font-medium" style={{ color: isDarkMode ? '#ffffff' : '#1a1a1a' }}>Dark Mode</span>
-            </div>
-                    <label className="relative inline-flex items-center cursor-pointer">
-                      <input 
-                        type="checkbox" 
-                        className="sr-only peer" 
-                        checked={isDarkMode}
-                        onChange={() => setIsDarkMode(!isDarkMode)}
-                      />
-                        <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-blue-600"></div>
-                    </label>
+                        <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ backgroundColor: isDarkMode ? '#333333' : '#f8f9fa' }}>
+                          <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+                          </svg>
+                        </div>
+                        <div>
+                          <span className="font-medium" style={{ color: isDarkMode ? '#ffffff' : '#1a1a1a' }}>Theme</span>
+                          <div className="text-xs" style={{ color: isDarkMode ? '#888888' : '#666666' }}>
+                            Light, dark, or system
+                          </div>
+                        </div>
+                      </div>
+                      <SimpleThemeToggle />
+                    </div>
                   </div>
                 </div>
-              </div>
 
 
 
                 {/* Mobile App Section */}
-                <div className="space-y-4">
-                  <h3 className="text-lg font-semibold flex items-center gap-2" style={{ color: isDarkMode ? '#ffffff' : '#1a1a1a' }}>
-                    <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z" />
-                    </svg>
-                    Mobile App
-                  </h3>
-                  <div className="p-4 rounded-lg border-2 border-dashed transition-all duration-200 hover:border-blue-500 cursor-pointer" style={{ 
-                    borderColor: isDarkMode ? '#333333' : '#e5e5e5',
-                    backgroundColor: isDarkMode ? '#1a1a1a' : '#ffffff'
-                  }}>
-                    <div className="text-center">
-                      <div className="w-12 h-12 mx-auto mb-3 rounded-lg flex items-center justify-center" style={{ backgroundColor: '#ff4444' }}>
-                        <svg width="24" height="24" fill="none" viewBox="0 0 24 24" stroke="#ffffff">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v12m0 0l-4-4m4 4l4-4" />
-                          <rect x="6" y="17" width="12" height="4" rx="2" strokeWidth="2" />
-                </svg>
-              </div>
-                      <h4 className="font-semibold mb-1" style={{ color: isDarkMode ? '#ffffff' : '#1a1a1a' }}>Get Mobile App</h4>
-                      <p className="text-sm" style={{ color: isDarkMode ? '#888888' : '#666666' }}>Install for better experience</p>
-                    </div>
-                  </div>
-                </div>
+         
               </div>
             </div>
 
@@ -2795,10 +2949,18 @@ export default function Dashboard() {
 
       {/* Directions Form - Inline below search bar */}
       {showDirections && (
-        <div className="absolute top-16 sm:top-20 md:top-24 left-1/2 -translate-x-1/2 w-full max-w-[95%] sm:max-w-2xl lg:max-w-4xl z-10">
+        <div 
+          className="absolute top-16 sm:top-20 md:top-24 left-1/2 -translate-x-1/2 w-full max-w-[95%] sm:max-w-2xl lg:max-w-4xl z-10 pointer-events-auto"
+          style={{
+            touchAction: 'manipulation',
+            WebkitUserSelect: 'none',
+            userSelect: 'none'
+          }}
+        >
           <div className="rounded-lg sm:rounded-xl shadow-lg backdrop-blur-sm p-4" style={{ 
             backgroundColor: `${isDarkMode ? '#1a1a1a' : '#ffffff'}e6`, 
-            border: `1px solid ${isDarkMode ? '#333333' : '#e5e5e5'}` 
+            border: `1px solid ${isDarkMode ? '#333333' : '#e5e5e5'}`,
+            touchAction: 'manipulation'
           }}>
             <div className="space-y-3">
               {/* Destination Input */}
@@ -3859,14 +4021,7 @@ export default function Dashboard() {
                   <rect x="6" y="17" width="12" height="4" rx="2" strokeWidth="2" />
                 </svg>
               </div>
-              <div style={{
-                fontSize: '1.35rem',
-                fontWeight: 700,
-                color: '#ff4444',
-                letterSpacing: '0.5px',
-              }}>
-                Get the Mobile App
-              </div>
+              
             </div>
             <hr style={{ border: 'none', borderTop: isDarkMode ? '1.5px solid #232326' : '1.5px solid #ffeaea', margin: '0 -32px' }} />
             {/* Placeholder for mobile app info */}
@@ -4127,6 +4282,21 @@ export default function Dashboard() {
           }
         }
         
+        @keyframes fadeIn {
+          from {
+            opacity: 0;
+            transform: translateY(-20px) scale(0.9);
+          }
+          to {
+            opacity: 1;
+            transform: translateY(0) scale(1);
+          }
+        }
+        
+        .animate-fade-in {
+          animation: fadeIn 0.3s ease-out;
+        }
+        
         @media (max-width: 640px) {
           .violation-panel-content { padding: 24px 10px 16px 10px !important; font-size: 1rem !important; }
           .violation-panel-content h2 { font-size: 1.1rem !important; }
@@ -4141,7 +4311,26 @@ export default function Dashboard() {
           }
         }
       `}</style>
-    </div>
+      
+      {/* Simple Proximity Notification */}
+      {proximityNotification.show && (
+        <div className="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-50">
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg border border-red-200 dark:border-red-700 px-4 py-3 max-w-sm mx-4 animate-fade-in">
+            <div className="flex items-center space-x-3">
+              <div className="w-8 h-8 bg-red-500 rounded-full flex items-center justify-center flex-shrink-0">
+                <span className="text-white text-lg">🚨</span>
+              </div>
+              <div className="flex-1">
+                <p className="text-sm font-medium text-gray-900 dark:text-white">
+                  {proximityNotification.message}
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      
 
+    </div>
   );
 } 
