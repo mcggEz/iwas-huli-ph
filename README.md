@@ -1,6 +1,6 @@
 # Iwas Huli App
 
-This app that helps users navigate safely by providing real-time proximity alerts for violation zones. Built with Next.js 15 and modern web technologies.
+This app that helps users navigate safely by providing real-time proximity alerts for violation zones. Built with Next.js.
 
 ## ✨ Features
 
