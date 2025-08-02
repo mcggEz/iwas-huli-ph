@@ -2150,32 +2150,7 @@ export default function Dashboard() {
                   </div>
                 </div>
 
-                {/* Check Proximity Button */}
-                <div className="px-4 py-2">
-                  <button
-                    onClick={() => {
-                      if (userLocation) {
-                        checkProximityToViolations(userLocation.lat, userLocation.lng);
-                        setShowMenu(false);
-                      } else {
-                        alert('Please enable location tracking first to check proximity.');
-                      }
-                    }}
-                    className="w-full px-4 py-2 text-sm font-medium rounded-lg transition-all duration-200"
-                    style={{ 
-                      backgroundColor: '#ff4444',
-                      color: '#ffffff'
-                    }}
-                    onMouseEnter={(e) => {
-                      e.currentTarget.style.backgroundColor = '#e53e3e';
-                    }}
-                    onMouseLeave={(e) => {
-                      e.currentTarget.style.backgroundColor = '#ff4444';
-                    }}
-                  >
-                    🔍 Check Current Proximity
-                  </button>
-                </div>
+
               </div>
             </div>
           )}
