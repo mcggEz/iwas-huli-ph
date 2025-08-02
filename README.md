@@ -1,23 +1,23 @@
-# Iwas Huli App
+# 🚨 Iwas Huli - Manila Traffic Violation Alert System
 
-This app helps users navigate safely by providing real-time proximity alerts for violation zones. Built with Next.js.
+This is a comprehensive traffic violation visualization platform that maps and displays violation hotspots across Manila, empowering drivers to see where others have been caught and make informed decisions about their routes.
 
-## ✨ Features
+## ✨ Key Features
 
-### 🗺️ **Interactive Map**
-- Google Maps integration with real-time location tracking
-- Visual violation zones displayed as red circles 
+### 🗺️ **Real-Time Mapping**
+- Interactive Google Maps showing violation hotspots across Manila
+- Visual violation zones displayed as red circles (50m radius)
+- User location tracking with blue dot indicator
 
 ## 🛠️ Tech Stack
 
 ### Frontend
-- **Next.js 15**
-- **TypeScript** 
-- **Tailwind CSS**
-- **Google Maps JavaScript API**
+- **Next.js 15** - React framework with App Router
+- **TypeScript** - Type-safe JavaScript
+- **Tailwind CSS** - Utility-first CSS framework
+- **Google Maps JavaScript API** - Map rendering and geolocation
 
 ### Backend
-- **Supabase** 
-- **Next.js API Routes**
-
+- **Supabase** - Backend-as-a-Service (PostgreSQL + API)
+- **Next.js API Routes** - Server-side API endpoints
 
