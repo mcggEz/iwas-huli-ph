@@ -2,6 +2,9 @@
 
 This is a comprehensive traffic violation visualization platform that maps and displays violation hotspots across Manila, empowering drivers to see where others have been caught and make informed decisions about their routes.
 
+<img width="1915" height="974" alt="image" src="https://github.com/user-attachments/assets/eb5c75c1-563d-4929-8a95-c545ab91bcaf" />
+
+
 ## ✨ Key Features
 
 ### 🗺️ **Real-Time Mapping**
